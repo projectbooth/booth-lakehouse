@@ -1,0 +1,6 @@
+apiVersion: v2
+name: booth-lakehouse
+description: Project Booth's lakehouse module — a self-hosted Lakekeeper Iceberg REST catalog behind a workspace-scoped, role-enforcing API, with storage access from the ADR 0080 credential broker (ADR 0079).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

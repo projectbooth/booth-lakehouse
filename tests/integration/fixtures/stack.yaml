@@ -1,0 +1,95 @@
+# Layer-3 (kind) fixtures: everything booth-lakehouse's chart expects from its surroundings, stood up
+# in its namespace. Test tooling only.
+#
+# Real: Postgres (as core would provision it, ADR 0053), MinIO (the s3 store a booth-storage backend
+# fronts). Stand-in: fakecore (tests/integration/fakecore.py) for core's IdP, gateway, workload-token
+# minting and the ADR 0080 broker at its provisional shape — minting real, really-scoped MinIO keys.
+# The Secrets core would provision (ADR 0020) are created by hack/kind-integration.sh.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: postgres}
+spec:
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata: {labels: {app: postgres}}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: POSTGRES_USER, value: booth_mod_lakehouse}
+            - {name: POSTGRES_PASSWORD, value: lakehouse-test}
+            - {name: POSTGRES_DB, value: booth_mod_lakehouse}
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "booth_mod_lakehouse"]}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata: {name: postgres}
+spec:
+  selector: {app: postgres}
+  ports: [{port: 5432}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: minio}
+spec:
+  selector: {matchLabels: {app: minio}}
+  template:
+    metadata: {labels: {app: minio}}
+    spec:
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:latest
+          imagePullPolicy: IfNotPresent
+          args: ["server", "/data"]
+          env:
+            - {name: MINIO_ROOT_USER, value: booth-test}
+            - {name: MINIO_ROOT_PASSWORD, value: booth-test-secret}
+          readinessProbe:
+            httpGet: {path: /minio/health/ready, port: 9000}
+            periodSeconds: 2
+          lifecycle:
+            postStart:
+              exec:
+                command: ["sh", "-c", "for i in $(seq 1 60); do mc alias set l http://127.0.0.1:9000 booth-test booth-test-secret >/dev/null 2>&1 && mc mb -p l/lake && exit 0; sleep 1; done; exit 1"]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: minio}
+spec:
+  selector: {app: minio}
+  ports: [{port: 9000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: fakecore}
+spec:
+  selector: {matchLabels: {app: fakecore}}
+  template:
+    # booth-it/core: fakecore plays booth-core, so it is the chart's core.podSelector peer (NetworkPolicy).
+    metadata: {labels: {app: fakecore, booth-it/core: "true"}}
+    spec:
+      containers:
+        - name: fakecore
+          image: booth-lakehouse-tests:it
+          imagePullPolicy: Never
+          command: ["python", "tests/integration/fakecore.py"]
+          env:
+            - {name: FAKECORE_API_URL, value: "http://it-booth-lakehouse-api:8080"}
+            - name: FAKECORE_BACKENDS
+              value: >-
+                {"acme": {"lake": {"bucket": "lake", "prefix": "acme-data"}, "files": {"kind": "filesystem"}},
+                 "beta": {"lake": {"bucket": "lake", "prefix": "beta-data"}}}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 9090}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata: {name: fakecore}
+spec:
+  selector: {app: fakecore}
+  ports: [{port: 9090}]

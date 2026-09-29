@@ -1,0 +1,120 @@
+# Real dependencies for tests/integration, plus this module's real API image. Test tooling only.
+#
+#   docker compose -f hack/docker-compose.yml up -d --build --wait
+#   docker compose -f hack/docker-compose.yml run --rm tests
+#   docker compose -f hack/docker-compose.yml down -v
+#
+# Real: Lakekeeper (pinned digest), its Postgres, MinIO (the S3-compatible store a booth-storage
+# backend fronts), and booth-lakehouse's own API container built from ./Dockerfile.
+# Stand-in: fakecore (tests/integration/fakecore.py) for booth-core's IdP, gateway, workload-token
+# minting and — until booth-core ships it — the ADR 0080 broker at a provisional wire shape, minting
+# REAL, really-scoped MinIO credentials.
+x-lakekeeper-env: &lk-env
+  LAKEKEEPER__PG_DATABASE_URL_READ: postgres://lakehouse:lakehouse-test@postgres:5432/booth_mod_lakehouse?sslmode=disable
+  LAKEKEEPER__PG_DATABASE_URL_WRITE: postgres://lakehouse:lakehouse-test@postgres:5432/booth_mod_lakehouse?sslmode=disable
+  LAKEKEEPER__PG_ENCRYPTION_KEY: local-test-encryption-key-not-a-secret
+  LAKEKEEPER__BASE_URI: http://lakekeeper:8181
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lakehouse
+      POSTGRES_PASSWORD: lakehouse-test
+      POSTGRES_DB: booth_mod_lakehouse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lakehouse -d booth_mod_lakehouse"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: booth-test
+      MINIO_ROOT_PASSWORD: booth-test-secret
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  minio-init:
+    image: quay.io/minio/minio:latest
+    entrypoint: ["sh", "-c", "mc alias set l http://minio:9000 booth-test booth-test-secret && mc mb -p l/lake"]
+    depends_on:
+      minio: { condition: service_healthy }
+
+  lakekeeper-migrate:
+    image: quay.io/lakekeeper/catalog@sha256:d6829722cac0d00dfc5665b0955766387b93ccadd8b1e70e679b49619bc30ea5 # v0.13.6
+    command: ["migrate"]
+    environment: *lk-env
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  lakekeeper:
+    image: quay.io/lakekeeper/catalog@sha256:d6829722cac0d00dfc5665b0955766387b93ccadd8b1e70e679b49619bc30ea5 # v0.13.6
+    command: ["serve"]
+    environment: *lk-env
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      lakekeeper-migrate: { condition: service_completed_successfully }
+
+  fakecore:
+    build: { context: .., dockerfile: tests/integration/Dockerfile }
+    command: ["python", "tests/integration/fakecore.py"]
+    volumes: ["../tests:/src/tests:ro"]
+    environment:
+      FAKECORE_BACKENDS: >-
+        {"acme": {"lake": {"bucket": "lake", "prefix": "acme-data"},
+                  "files": {"kind": "filesystem"}},
+         "beta": {"lake": {"bucket": "lake", "prefix": "beta-data"}}}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/healthz')"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      minio-init: { condition: service_completed_successfully }
+
+  api:
+    build: { context: .., dockerfile: Dockerfile }
+    environment:
+      LAKEKEEPER_URL: http://lakekeeper:8181
+      DATABASE_DSN: postgres://lakehouse:lakehouse-test@postgres:5432/booth_mod_lakehouse?sslmode=disable
+      BOOTH_OIDC_ISSUER_URL: http://fakecore:9090
+      BOOTH_CREDENTIAL_BROKER_URL: http://fakecore:9090/api/credentials
+      BOOTH_WORKLOAD_MINT_URL: http://fakecore:9090/api/internal/workload-tokens
+      BOOTH_WORKLOAD_MINT_CREDENTIAL: test-mint-credential
+      # Renew almost immediately (MinIO's floor for an expiring key is 15 min, so the TTL can't be
+      # shorter): the renewal test sees a real rotation within ~30 s.
+      WAREHOUSE_CREDENTIAL_TTL_SECONDS: "960"
+      WAREHOUSE_CREDENTIAL_RENEW_MARGIN_SECONDS: "930"
+      WAREHOUSE_CREDENTIAL_RENEW_INTERVAL_SECONDS: "5"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      lakekeeper: { condition: service_healthy }
+      fakecore: { condition: service_healthy }
+
+  tests:
+    profiles: ["tests"]
+    build: { context: .., dockerfile: tests/integration/Dockerfile }
+    command: ["pytest", "tests/integration", "-v"]
+    volumes: ["../tests:/src/tests:ro"]
+    environment:
+      BOOTH_INTEGRATION: "1"
+      BOOTH_SLOW: ${BOOTH_SLOW:-}
+      API_URL: http://api:8080
+      FAKECORE_URL: http://fakecore:9090
+      MINIO_ENDPOINT: http://minio:9000
+    depends_on:
+      api: { condition: service_healthy }

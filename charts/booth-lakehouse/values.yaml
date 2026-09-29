@@ -1,0 +1,63 @@
+# booth-lakehouse. Requires booth-core (BoothModule CRD, booth-database-credentials, and — for warehouse
+# credential renewal — booth-workload-minting-credentials).
+
+image:
+  repository: ghcr.io/projectbooth/booth-lakehouse
+  tag: ""            # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+lakekeeper:
+  # Upstream Lakekeeper, pinned by digest (v0.13.6). The API process drives its management API and
+  # proxies its catalog API; nothing else can reach it (networkpolicies.yaml).
+  image: quay.io/lakekeeper/catalog@sha256:d6829722cac0d00dfc5665b0955766387b93ccadd8b1e70e679b49619bc30ea5
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+core:
+  # booth-core's in-cluster URL. The broker URL below defaults to <core.url>/api/credentials.
+  url: http://booth-core.booth-system.svc.cluster.local:8080
+  # Which pods may call this module: booth-core's gateway (and its health checks). Must match your core install.
+  namespaceSelector:
+    kubernetes.io/metadata.name: booth-system
+  podSelector:
+    app.kubernetes.io/name: booth-core
+
+identity:
+  # The deployment's OIDC issuer (people) — exactly as it appears in tokens' `iss`.
+  oidcIssuerUrl: ""
+  oidcAudience: ""
+  # booth-core's workload-token issuer (notebook kernels, pipeline tasks — ADR 0056). Empty = take it
+  # from booth-workload-minting-credentials' `issuer` when workloadIdentity.enabled.
+  workloadIssuerUrl: ""
+  groupsClaim: groups
+
+broker:
+  # ADR 0080's credential broker (booth-core). PROVISIONAL: booth-core hasn't published the real
+  # endpoint yet (docs/decisions/0001). Empty = <core.url>/api/credentials.
+  url: ""
+
+# Renewing a warehouse's storage credential happens with no person present, so the module mints a
+# workload token for it (ADR 0056). Disabled = warehouses stop working when their first credential expires.
+workloadIdentity:
+  enabled: true
+
+warehouseCredential:
+  ttlSeconds: 3600
+  renewMarginSeconds: 900
+  renewIntervalSeconds: 60
+
+networkPolicy:
+  enabled: true
+  dns:
+    namespaceSelector:
+      kubernetes.io/metadata.name: kube-system
+    podSelector:
+      k8s-app: kube-dns
+
+resources:
+  requests: {cpu: 50m, memory: 128Mi}
+  limits: {memory: 512Mi}
+
+nameOverride: ""
+fullnameOverride: ""

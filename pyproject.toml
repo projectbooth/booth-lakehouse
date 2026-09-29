@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "booth-lakehouse"
+version = "0.1.0"
+description = "Project Booth's lakehouse module: a self-hosted Lakekeeper Iceberg REST catalog behind a workspace-scoped, role-enforcing proxy, with storage access from the ADR 0080 credential broker (ADR 0079)."
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "booth-lakehouse-client",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "httpx>=0.27",
+  "pyjwt[crypto]>=2.9",
+  "psycopg[binary]>=3.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "pyyaml>=6", "pandas>=2.2", "duckdb>=1.1", "minio>=7.2"]
+
+[project.scripts]
+booth-lakehouse = "booth_lakehouse_server.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 110
+src = ["src", "tests", "client/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom.
+extend-immutable-calls = ["fastapi.Depends"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["booth_lakehouse", "booth_lakehouse_server"]

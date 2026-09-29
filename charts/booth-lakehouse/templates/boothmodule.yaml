@@ -1,0 +1,35 @@
+# Registers booth-lakehouse with booth-core's module registry (ADR 0019, contracts/module-manifest.md).
+#
+# No UI in v0 (hasOwnUi: false): the brief places the module under Manage, but what a lakehouse UI
+# should expose (snapshot browsing, time travel, rollback) is an open question for the user
+# (docs/decisions/0001), so nothing is built ahead of that. Tables are used through the client library.
+apiVersion: booth.projectbooth.io/v1alpha1
+kind: BoothModule
+metadata:
+  name: lakehouse
+  labels:
+    {{- include "booth-lakehouse.labels" . | nindent 4 }}
+spec:
+  id: lakehouse
+  displayName: Lakehouse
+  icon: database
+  version: {{ .Chart.AppVersion | quote }}
+  contractVersion: "0.1.0"
+  hasOwnUi: false
+  healthCheckPath: /health
+  requiredScopes:
+    - storage.read
+    - storage.write
+  # Lakekeeper's catalog state plus this module's warehouse bindings (own schema) — ADR 0053.
+  database:
+    enabled: true
+  {{- if .Values.workloadIdentity.enabled }}
+  # ADR 0056: renewing a warehouse's broker credential happens with nobody present. The minting
+  # credential is mounted only into the API pod, never into Lakekeeper.
+  workloadIdentity:
+    mint: true
+  {{- end }}
+  # No `events` (ADR 0050): v0 neither publishes nor subscribes.
+  serviceRef:
+    name: {{ include "booth-lakehouse.fullname" . }}-api
+    port: 8080

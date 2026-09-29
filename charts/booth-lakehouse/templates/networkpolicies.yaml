@@ -1,0 +1,58 @@
+{{- /*
+Network boundaries. Load-bearing: Lakekeeper has no authentication of its own, so "only the API pod
+can reach Lakekeeper" is what makes the API's per-workspace pinning a real boundary rather than a
+suggestion. Requires a CNI that enforces NetworkPolicy. Current kind (kindnet) does, and
+hack/kind-integration.sh checks it; on one that doesn't (k3s's default flannel) these are silently
+inert — ARCHITECTURE.md §7 item 37(b), not solved here.
+
+Lakekeeper's and the API's egress stays open: both need the (operator-chosen, possibly external)
+Postgres and object store, whose addresses this chart can't know.
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $sel := include "booth-lakehouse.selectorLabels" . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "booth-lakehouse.fullname" . }}-lakekeeper
+  labels:
+    {{- include "booth-lakehouse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- $sel | nindent 6 }}
+      app.kubernetes.io/component: lakekeeper
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- $sel | nindent 14 }}
+              app.kubernetes.io/component: api
+      ports:
+        - {protocol: TCP, port: 8181}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "booth-lakehouse.fullname" . }}-api
+  labels:
+    {{- include "booth-lakehouse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- $sel | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress]
+  ingress:
+    # booth-core only: its gateway (every caller, ADR 0007/0059) and its health checks. Callers
+    # still re-verify here (ADR 0041); this just removes the direct path.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.core.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.core.podSelector | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: 8080}
+{{- end }}

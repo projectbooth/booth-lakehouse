@@ -1,0 +1,103 @@
+{{- /*
+The API process (src/booth_lakehouse_server): what booth-core's gateway routes /modules/lakehouse to.
+Holds: its database DSN (warehouse bindings), and — when workloadIdentity is enabled — the workload
+minting credential it uses to renew warehouse credentials. Never Lakekeeper's encryption key, never a
+storage credential at rest (it passes each broker grant straight to Lakekeeper).
+*/ -}}
+{{- $full := include "booth-lakehouse.fullname" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-api
+  labels:
+    {{- include "booth-lakehouse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "booth-lakehouse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "booth-lakehouse.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: LAKEKEEPER_URL
+              value: http://{{ $full }}-lakekeeper:8181
+            - name: DATABASE_DSN
+              valueFrom: {secretKeyRef: {name: booth-database-credentials, key: dsn}}
+            - name: BOOTH_OIDC_ISSUER_URL
+              value: {{ required "identity.oidcIssuerUrl is required (the deployment's OIDC issuer, as in tokens' iss)" .Values.identity.oidcIssuerUrl | quote }}
+            - name: BOOTH_OIDC_AUDIENCE
+              value: {{ .Values.identity.oidcAudience | quote }}
+            - name: BOOTH_GROUPS_CLAIM
+              value: {{ .Values.identity.groupsClaim | quote }}
+            {{- if .Values.identity.workloadIssuerUrl }}
+            - name: BOOTH_WORKLOAD_ISSUER_URL
+              value: {{ .Values.identity.workloadIssuerUrl | quote }}
+            {{- else if .Values.workloadIdentity.enabled }}
+            - name: BOOTH_WORKLOAD_ISSUER_URL
+              valueFrom: {secretKeyRef: {name: booth-workload-minting-credentials, key: issuer}}
+            {{- end }}
+            - name: BOOTH_CREDENTIAL_BROKER_URL
+              value: {{ include "booth-lakehouse.brokerUrl" . | quote }}
+            {{- if .Values.workloadIdentity.enabled }}
+            - name: BOOTH_WORKLOAD_MINT_URL
+              valueFrom: {secretKeyRef: {name: booth-workload-minting-credentials, key: url}}
+            - name: BOOTH_WORKLOAD_MINT_CREDENTIAL
+              valueFrom: {secretKeyRef: {name: booth-workload-minting-credentials, key: credential}}
+            {{- end }}
+            - name: WAREHOUSE_CREDENTIAL_TTL_SECONDS
+              value: {{ .Values.warehouseCredential.ttlSeconds | quote }}
+            - name: WAREHOUSE_CREDENTIAL_RENEW_MARGIN_SECONDS
+              value: {{ .Values.warehouseCredential.renewMarginSeconds | quote }}
+            - name: WAREHOUSE_CREDENTIAL_RENEW_INTERVAL_SECONDS
+              value: {{ .Values.warehouseCredential.renewIntervalSeconds | quote }}
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            # Liveness must not follow Lakekeeper's health, or a Lakekeeper outage restarts this pod too.
+            tcpSocket: {port: http}
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-api
+  labels:
+    {{- include "booth-lakehouse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  selector:
+    {{- include "booth-lakehouse.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  ports:
+    - {name: http, port: 8080, targetPort: http}

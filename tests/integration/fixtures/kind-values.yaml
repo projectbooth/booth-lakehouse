@@ -1,0 +1,8 @@
+# hack/kind-integration.sh: fakecore and the test Job play booth-core, so they are the API's only
+# allowed ingress peers (networkpolicies.yaml) — the NetworkPolicies stay ON, since kind enforces them.
+core:
+  namespaceSelector:
+    kubernetes.io/metadata.name: booth-lakehouse
+  podSelector:
+    app.kubernetes.io/name: null   # drop the chart default (booth-core's own label)
+    booth-it/core: "true"

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "booth-lakehouse-client"
+version = "0.1.0"
+description = "Iceberg tables in a Project Booth workspace: create/open/read/append through booth-lakehouse's catalog, with storage access from the ADR 0080 credential broker."
+requires-python = ">=3.11"
+# PyIceberg is the write path (ADR 0079); pyarrow is what it reads and writes with. pandas and
+# duckdb are used when present, never required.
+dependencies = ["pyiceberg[pyarrow]>=0.12,<0.13"]
+
+[project.optional-dependencies]
+pandas = ["pandas>=2.2"]
+duckdb = ["duckdb>=1.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

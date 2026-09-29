@@ -1,0 +1,46 @@
+name: Integration
+
+# Layer 3 (contracts/testing-strategy.md): on merge to main and nightly, not every push.
+#  - real-stack: this module's real image against real Lakekeeper + Postgres + MinIO (docker compose).
+#    Nightly also runs the slow test that waits out a real credential's expiry.
+#  - kind: the real chart on a real cluster, validated by booth-core's real CRD, suite run in-cluster,
+#    restart survival.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Up
+        run: docker compose -f hack/docker-compose.yml up -d --build --wait
+      - name: Suite
+        env:
+          BOOTH_SLOW: ${{ github.event_name == 'schedule' && '1' || '' }}
+        run: docker compose -f hack/docker-compose.yml run --rm tests
+      - name: Logs on failure
+        if: failure()
+        run: docker compose -f hack/docker-compose.yml logs --tail=200 api lakekeeper fakecore
+      - name: Down
+        if: always()
+        run: docker compose -f hack/docker-compose.yml down -v
+
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - run: sh hack/kind-integration.sh

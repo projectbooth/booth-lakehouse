@@ -1,0 +1,87 @@
+{{- /*
+Lakekeeper: the Iceberg REST catalog (ADR 0079). No authentication of its own — the API pod in front
+of it re-verifies every caller and pins them to their workspace's warehouse (src/.../proxy.py) — so
+the only thing allowed to reach it is that API pod (networkpolicies.yaml). It uses this module's
+core-provisioned database (ADR 0053); `migrate` runs as an init container and is idempotent.
+
+It holds exactly one kind of secret: each workspace's current broker-issued, short-lived, scoped
+storage credential (set and renewed by the API process), encrypted into its Postgres with the key in
+secret.yaml. Never a backend's real credential (ADR 0039/0080).
+*/ -}}
+{{- $full := include "booth-lakehouse.fullname" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-lakekeeper
+  labels:
+    {{- include "booth-lakehouse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lakekeeper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "booth-lakehouse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: lakekeeper
+  template:
+    metadata:
+      labels:
+        {{- include "booth-lakehouse.labels" . | nindent 8 }}
+        app.kubernetes.io/component: lakekeeper
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        # The upstream image sets no USER, i.e. it runs as root by default (found on kind:
+        # runAsNonRoot alone refuses to start it). 65532 is its distroless base's `nonroot`.
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        - name: migrate
+          image: {{ .Values.lakekeeper.image }}
+          args: ["migrate"]
+          env: &env
+            - name: LAKEKEEPER__PG_DATABASE_URL_READ
+              valueFrom: {secretKeyRef: {name: booth-database-credentials, key: dsn}}
+            - name: LAKEKEEPER__PG_DATABASE_URL_WRITE
+              valueFrom: {secretKeyRef: {name: booth-database-credentials, key: dsn}}
+            - name: LAKEKEEPER__PG_ENCRYPTION_KEY
+              valueFrom: {secretKeyRef: {name: {{ $full }}-lakekeeper, key: encryption-key}}
+            - name: LAKEKEEPER__BASE_URI
+              value: http://{{ $full }}-lakekeeper:8181
+          securityContext: &sc
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: lakekeeper
+          image: {{ .Values.lakekeeper.image }}
+          args: ["serve"]
+          env: *env
+          ports:
+            - {name: http, containerPort: 8181}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext: *sc
+          resources:
+            {{- toYaml .Values.lakekeeper.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-lakekeeper
+  labels:
+    {{- include "booth-lakehouse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lakekeeper
+spec:
+  selector:
+    {{- include "booth-lakehouse.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: lakekeeper
+  ports:
+    - {name: http, port: 8181, targetPort: http}

@@ -1,7 +1,8 @@
 name: Integration
 
 # Layer 3 (contracts/testing-strategy.md): on merge to main and nightly, not every push.
-#  - real-stack: this module's real image against real Lakekeeper + Postgres + MinIO (docker compose).
+#  - real-stack: this module's real image against real Lakekeeper + Postgres + MinIO + NATS JetStream in
+#    core's JWT operator mode (docker compose).
 #    Nightly also runs the slow test that waits out a real credential's expiry.
 #  - kind: the real chart on a real cluster, validated by booth-core's real CRD, suite run in-cluster,
 #    restart survival.
@@ -22,14 +23,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Up
-        run: docker compose -f hack/docker-compose.yml up -d --build --wait
+        # The tests image is in a compose profile, so `up --build` doesn't build it.
+        run: |
+          docker compose -f hack/docker-compose.yml up -d --build --wait
+          docker compose -f hack/docker-compose.yml build tests
       - name: Suite
         env:
           BOOTH_SLOW: ${{ github.event_name == 'schedule' && '1' || '' }}
         run: docker compose -f hack/docker-compose.yml run --rm tests
       - name: Logs on failure
         if: failure()
-        run: docker compose -f hack/docker-compose.yml logs --tail=200 api lakekeeper fakecore
+        run: docker compose -f hack/docker-compose.yml logs --tail=200 api lakekeeper fakecore nats nats-init
       - name: Down
         if: always()
         run: docker compose -f hack/docker-compose.yml down -v

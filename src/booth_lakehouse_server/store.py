@@ -1,9 +1,14 @@
-"""Which warehouse belongs to which workspace, and where it lives — this module's only own state.
+"""This module's own state: which warehouse belongs to which workspace, and what booth-catalog has
+last been told about each table.
 
-A binding records the ``{backendId, path}`` a workspace owner chose (ADR 0045), the Lakekeeper
+A **binding** records the ``{backendId, path}`` a workspace owner chose (ADR 0045), the Lakekeeper
 warehouse created for it, and the lease/expiry of the broker credential Lakekeeper currently holds
 (so the refresher knows what to renew). It never records a credential value: that lives only in
-Lakekeeper's own encrypted secret store (docs/decisions/0001 on why that's acceptable here).
+Lakekeeper's own encrypted secret store (ADR 0084, judgment call 4).
+
+A **published** row is the last ``table.*`` event this module got a JetStream ack for, per table
+(``events.py``): a digest of what was said, so the publisher emits only real changes, and when, so
+updates to one table are rate-limited.
 
 Stored in this module's core-provisioned database (ADR 0053), in its own ``booth_lakehouse`` schema so
 it never collides with Lakekeeper's tables in the same database.
@@ -40,8 +45,20 @@ class Binding:
         }
 
 
+@dataclass(frozen=True)
+class Published:
+    table_uuid: str
+    namespace: str
+    name: str
+    digest: str
+    published_at: float
+
+
 class Store:
     def get(self, workspace: str) -> Binding | None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def all(self) -> list[Binding]:  # pragma: no cover - interface
         raise NotImplementedError
 
     def insert(self, b: Binding) -> None:  # pragma: no cover - interface
@@ -54,6 +71,15 @@ class Store:
     def due(self, before: float) -> list[Binding]:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def published(self, workspace: str) -> dict[str, Published]:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def record_published(self, workspace: str, p: Published) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def forget_published(self, workspace: str, table_uuid: str) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
 
 class Conflict(Exception):
     pass
@@ -62,10 +88,14 @@ class Conflict(Exception):
 class MemoryStore(Store):
     def __init__(self) -> None:
         self._rows: dict[str, Binding] = {}
+        self._published: dict[str, dict[str, Published]] = {}
         self._lock = threading.Lock()
 
     def get(self, workspace):
         return self._rows.get(workspace)
+
+    def all(self):
+        return list(self._rows.values())
 
     def insert(self, b):
         with self._lock:
@@ -79,6 +109,17 @@ class MemoryStore(Store):
 
     def due(self, before):
         return [b for b in self._rows.values() if b.credential_expires_at < before]
+
+    def published(self, workspace):
+        return dict(self._published.get(workspace, {}))
+
+    def record_published(self, workspace, p):
+        with self._lock:
+            self._published.setdefault(workspace, {})[p.table_uuid] = p
+
+    def forget_published(self, workspace, table_uuid):
+        with self._lock:
+            self._published.get(workspace, {}).pop(table_uuid, None)
 
 
 _SCHEMA = """
@@ -94,6 +135,15 @@ CREATE TABLE IF NOT EXISTS booth_lakehouse.bindings (
     created_at             double precision NOT NULL,
     lease_id               text NOT NULL,
     credential_expires_at  double precision NOT NULL
+);
+CREATE TABLE IF NOT EXISTS booth_lakehouse.published_tables (
+    workspace     text NOT NULL,
+    table_uuid    text NOT NULL,
+    namespace     text NOT NULL,
+    name          text NOT NULL,
+    digest        text NOT NULL,
+    published_at  double precision NOT NULL,
+    PRIMARY KEY (workspace, table_uuid)
 );
 """
 
@@ -117,6 +167,10 @@ class PostgresStore(Store):
             row = c.execute(f"SELECT {_COLS} FROM booth_lakehouse.bindings WHERE workspace = %s", (workspace,)).fetchone()
         return Binding(*row) if row else None
 
+    def all(self):
+        with self._conn() as c:
+            return [Binding(*r) for r in c.execute(f"SELECT {_COLS} FROM booth_lakehouse.bindings ORDER BY workspace").fetchall()]
+
     def insert(self, b):
         try:
             with self._conn() as c:
@@ -135,3 +189,24 @@ class PostgresStore(Store):
         with self._conn() as c:
             rows = c.execute(f"SELECT {_COLS} FROM booth_lakehouse.bindings WHERE credential_expires_at < %s", (before,)).fetchall()
         return [Binding(*r) for r in rows]
+
+    def published(self, workspace):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT table_uuid, namespace, name, digest, published_at FROM booth_lakehouse.published_tables WHERE workspace = %s", (workspace,)
+            ).fetchall()
+        return {r[0]: Published(*r) for r in rows}
+
+    def record_published(self, workspace, p):
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO booth_lakehouse.published_tables (workspace, table_uuid, namespace, name, digest, published_at)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (workspace, table_uuid) DO UPDATE
+                   SET namespace = EXCLUDED.namespace, name = EXCLUDED.name, digest = EXCLUDED.digest, published_at = EXCLUDED.published_at""",
+                (workspace, p.table_uuid, p.namespace, p.name, p.digest, p.published_at),
+            )
+
+    def forget_published(self, workspace, table_uuid):
+        with self._conn() as c:
+            c.execute("DELETE FROM booth_lakehouse.published_tables WHERE workspace = %s AND table_uuid = %s", (workspace, table_uuid))

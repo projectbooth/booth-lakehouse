@@ -21,6 +21,10 @@ class Settings:
     warehouse_ttl_seconds: int = 3600
     renew_margin_seconds: int = 900
     renew_interval_seconds: int = 60
+    events_url: str = ""
+    events_creds_file: str = ""
+    events_interval_seconds: float = 10
+    events_update_min_gap_seconds: float = 60
 
     @classmethod
     def from_env(cls, env=None) -> Settings:
@@ -44,4 +48,9 @@ class Settings:
             warehouse_ttl_seconds=int(env.get("WAREHOUSE_CREDENTIAL_TTL_SECONDS", "3600")),
             renew_margin_seconds=int(env.get("WAREHOUSE_CREDENTIAL_RENEW_MARGIN_SECONDS", "900")),
             renew_interval_seconds=int(env.get("WAREHOUSE_CREDENTIAL_RENEW_INTERVAL_SECONDS", "60")),
+            # ADR 0050's booth-event-bus-credentials (url + nats.creds). Empty URL = no table.* events.
+            events_url=env.get("BOOTH_EVENTS_URL", ""),
+            events_creds_file=env.get("BOOTH_EVENTS_CREDS_FILE", ""),
+            events_interval_seconds=float(env.get("TABLE_EVENTS_INTERVAL_SECONDS", "10")),
+            events_update_min_gap_seconds=float(env.get("TABLE_EVENTS_UPDATE_MIN_GAP_SECONDS", "60")),
         )

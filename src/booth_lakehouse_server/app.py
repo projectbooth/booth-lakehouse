@@ -5,8 +5,8 @@
 - ``PUT  /api/warehouse``              — owner: create it at ``{backendId, path}`` (ADR 0045).
 - ``GET  /api/tables``                 — every table in this workspace's warehouse.
 - ``GET  /api/tables/{ns}/{table}``    — one table: schema, location as ``{backendId, path}``,
-                                         snapshots. This is the shape proposed for booth-catalog
-                                         (docs/decisions/0002) — nothing is registered there yet.
+                                         snapshots. Minus snapshots, the ``table.*`` event payload
+                                         booth-catalog registers (ADR 0085, events.py).
 - ``*    /iceberg/v1/...``             — the Iceberg REST catalog, authorized per ``proxy.py`` and
                                          forwarded to Lakekeeper.
 """
@@ -30,9 +30,11 @@ from booth_lakehouse.broker import Broker, HttpBroker
 
 from . import proxy
 from .config import Settings
+from .events import NatsPublisher, TableEvents, run_forever
 from .identity import AuthError, Forbidden, Identity, Verifier, resolve
 from .lakekeeper import Lakekeeper
 from .store import MemoryStore, PostgresStore, Store
+from .tables import TableNotFound, TableReader, TableRef, table_summary
 from .warehouses import WarehouseError, Warehouses, WorkloadTokens
 
 log = logging.getLogger("booth_lakehouse")
@@ -49,7 +51,10 @@ class Components:
     store: Store
     lakekeeper: Lakekeeper
     warehouses: Warehouses
+    tables: TableReader
     renew_interval_seconds: int = 60
+    events: TableEvents | None = None
+    events_interval_seconds: float = 10
 
 
 def components_from_settings(s: Settings) -> Components:
@@ -64,7 +69,13 @@ def components_from_settings(s: Settings) -> Components:
     broker_for: Callable[[Callable[[], str]], Broker] | None = (lambda tok: HttpBroker(s.broker_url, tok)) if s.broker_url else None
     minter = WorkloadTokens(s.workload_mint_url, s.workload_mint_credential) if s.workload_mint_url and s.workload_mint_credential else None
     wh = Warehouses(store, lk, broker_for, minter, s.warehouse_ttl_seconds, s.renew_margin_seconds)
-    return Components(Verifier(s.issuers, s.groups_claim), store, lk, wh, s.renew_interval_seconds)
+    reader = TableReader(s.lakekeeper_url)
+    events = None
+    if s.events_url:
+        events = TableEvents(store, reader, NatsPublisher(s.events_url, s.events_creds_file), s.events_update_min_gap_seconds)
+    else:
+        log.warning("BOOTH_EVENTS_URL is empty: no table.* events, so booth-catalog won't learn about tables (ADR 0085)")
+    return Components(Verifier(s.issuers, s.groups_claim), store, lk, wh, reader, s.renew_interval_seconds, events, s.events_interval_seconds)
 
 
 class WarehouseRequest(BaseModel):
@@ -80,12 +91,19 @@ def _iceberg_error(status: int, message: str) -> JSONResponse:
 def create_app(c: Components, run_renewals: bool = True, catalog_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        task = asyncio.create_task(_renew_loop(c)) if run_renewals else None
+        tasks = []
+        if run_renewals:
+            tasks.append(asyncio.create_task(_renew_loop(c)))
+        if c.events is not None:
+            tasks.append(asyncio.create_task(run_forever(c.events, nudge, c.events_interval_seconds)))
         yield
-        if task:
-            task.cancel()
+        for t in tasks:
+            t.cancel()
+        if c.events is not None:
+            await c.events.publisher.close()
 
     app = FastAPI(title="booth-lakehouse", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    nudge = asyncio.Event()  # set after a write through the proxy: publish table.* events soon
     catalog = httpx.AsyncClient(base_url=c.lakekeeper.base_url + "/catalog", timeout=120, transport=catalog_transport)
 
     def identity(request: Request) -> Identity:
@@ -105,7 +123,10 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
     @app.get("/health")
     def health():
         ok = c.lakekeeper.healthy()
-        return JSONResponse({"status": "ok" if ok else "unavailable", "lakekeeper": "ok" if ok else "unreachable"}, status_code=200 if ok else 503)
+        doc = {"status": "ok" if ok else "unavailable", "lakekeeper": "ok" if ok else "unreachable"}
+        # Informational: a stalled publisher shouldn't take the catalog API down with it.
+        doc["tableEvents"] = c.events.status if c.events is not None else "disabled"
+        return JSONResponse(doc, status_code=200 if ok else 503)
 
     @app.get("/api/warehouse")
     def get_warehouse(who: Identity = Depends(identity)):
@@ -129,30 +150,26 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
             raise HTTPException(404, f"workspace {who.workspace!r} has no warehouse yet")
         return b
 
-    async def _lk_json(path: str):
-        resp = await catalog.get(path)
-        if resp.status_code == 404:
-            raise HTTPException(404, "not found")
-        if resp.status_code >= 400:
-            raise HTTPException(502, f"Lakekeeper returned {resp.status_code}")
-        return resp.json()
-
     @app.get("/api/tables")
     async def list_tables(who: Identity = Depends(identity)):
         b = _binding(who)
-        out = []
-        nss = await _lk_json(f"/v1/{b.warehouse_id}/namespaces")
-        for ns in nss.get("namespaces", []):
-            enc = quote("\x1f".join(ns), safe="")
-            tbls = await _lk_json(f"/v1/{b.warehouse_id}/namespaces/{enc}/tables")
-            out.extend({"namespace": ".".join(t["namespace"]), "name": t["name"]} for t in tbls.get("identifiers", []))
-        return {"items": out}
+        try:
+            refs = await asyncio.to_thread(c.tables.tables, b.warehouse_id)
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"Lakekeeper: {e}") from None
+        return {"items": [{"namespace": r.dotted_namespace, "name": r.name} for r in refs]}
 
     @app.get("/api/tables/{namespace}/{table}")
     async def get_table(namespace: str, table: str, who: Identity = Depends(identity)):
         b = _binding(who)
-        doc = await _lk_json(f"/v1/{b.warehouse_id}/namespaces/{quote(namespace, safe='')}/tables/{quote(table, safe='')}")
-        return table_summary(b, namespace, table, doc["metadata"])
+        ref = TableRef(tuple(namespace.split(".")), table)
+        try:
+            md = await asyncio.to_thread(c.tables.metadata, b.warehouse_id, ref)
+        except TableNotFound:
+            raise HTTPException(404, "no such table") from None
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"Lakekeeper: {e}") from None
+        return table_summary(b, namespace, table, md)
 
     @app.api_route("/iceberg/{rest:path}", methods=["GET", "HEAD", "POST", "DELETE", "PUT"])
     async def iceberg(request: Request, rest: str):
@@ -183,39 +200,12 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
                 elif ("metadata" in doc and "config" in doc) or "storage-credentials" in doc:
                     doc = proxy.rewrite_table_response(doc)
                 body = json.dumps(doc).encode()
+        if request.method not in ("GET", "HEAD") and upstream.status_code < 300:
+            nudge.set()
         out_headers = {k: v for k, v in upstream.headers.items() if k.lower() in _FORWARD_RESPONSE}
         return Response(content=body, status_code=upstream.status_code, headers=out_headers)
 
     return app
-
-
-def table_summary(b, namespace: str, table: str, md: dict) -> dict:
-    """What a table *is*, platform-side: identity, schema, where it lives (as ``{backendId, path}``),
-    history. The candidate shape for surfacing a table in booth-catalog (docs/decisions/0002)."""
-    location = md.get("location", "")
-    root = b.storage_root.rstrip("/")
-    rel = location[len(root):].strip("/") if location.startswith(root) else None
-    current = md.get("current-schema-id")
-    schema = next((s for s in md.get("schemas", []) if s.get("schema-id") == current), {"fields": []})
-    return {
-        "namespace": namespace,
-        "name": table,
-        "tableUuid": md.get("table-uuid"),
-        "formatVersion": md.get("format-version"),
-        "location": {"backendId": b.backend_id, "path": f"{b.path}/{rel}".strip("/")} if rel is not None else None,
-        "schema": [
-            {"name": f["name"], "type": f["type"] if isinstance(f["type"], str) else f["type"].get("type"), "required": f.get("required", False), "doc": f.get("doc", "")}
-            for f in schema.get("fields", [])
-        ],
-        "schemaId": current,
-        "partitionSpec": next((s.get("fields", []) for s in md.get("partition-specs", []) if s.get("spec-id") == md.get("default-spec-id")), []),
-        "currentSnapshotId": md.get("current-snapshot-id"),
-        "snapshots": [
-            {"snapshotId": s["snapshot-id"], "timestampMs": s["timestamp-ms"], "operation": (s.get("summary") or {}).get("operation")}
-            for s in md.get("snapshots", [])
-        ],
-        "lastUpdatedMs": md.get("last-updated-ms"),
-    }
 
 
 async def _renew_loop(c: Components) -> None:

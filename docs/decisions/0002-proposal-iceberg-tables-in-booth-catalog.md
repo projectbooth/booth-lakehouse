@@ -1,6 +1,8 @@
 # 0002: Proposal — how an Iceberg table surfaces in booth-catalog
 
-Status: **Proposal for the coordinator — not built.** ARCHITECTURE.md §7 item 12 and ADR 0079 both
+Status: **Ruled — Option A, event-bus push (ADR 0085, 2026-09-28).** Publisher built: see 0003. Original proposal below.
+
+Was: **Proposal for the coordinator — not built.** ARCHITECTURE.md §7 item 12 and ADR 0079 both
 leave this open and say not to resolve it unilaterally. Nothing in this repo registers anything with
 booth-catalog.
 

@@ -42,6 +42,12 @@ broker:
 workloadIdentity:
   enabled: true
 
+# ADR 0085: publish table.created/updated/deleted for booth-catalog (manifest `events`, ADR 0050).
+tableEvents:
+  enabled: true
+  intervalSeconds: 10          # how often every warehouse is compared with what was last published
+  updateMinGapSeconds: 60      # at most one table.updated per table per this many seconds
+
 warehouseCredential:
   ttlSeconds: 3600
   renewMarginSeconds: 900

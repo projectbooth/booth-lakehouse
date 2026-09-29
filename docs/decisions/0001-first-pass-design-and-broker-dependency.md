@@ -1,6 +1,6 @@
 # 0001: First pass — design, judgment calls, and what's pending on the credential broker
 
-Status: Proposed for ratification (2026-09-28)
+Status: Ratified (ADR 0084, 2026-09-28); asks routed to booth-core, booth-storage and booth-notebooks.
 
 Everything here was built and tested against real Lakekeeper 0.13.6, real Postgres and real MinIO
 (`hack/docker-compose.yml`, `hack/kind-integration.sh`). booth-core's ADR 0080 broker does not exist

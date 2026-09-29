@@ -96,10 +96,31 @@ def test_no_ui_in_v0_so_no_ui_fields(spec):
         assert field not in spec
 
 
-def test_declares_database_and_workload_identity_and_no_event_bus(spec):
+def test_declares_database_workload_identity_and_exactly_the_table_events(spec):
     assert spec["database"] == {"enabled": True}  # ADR 0053
     assert spec["workloadIdentity"] == {"mint": True}  # ADR 0056, for credential renewal
-    assert "events" not in spec  # ADR 0050
+    # ADR 0085 via ADR 0050: publish only, only these three, nothing to subscribe to.
+    assert spec["events"] == {"publish": ["table.created", "table.updated", "table.deleted"]}
+    pattern = re.compile(r"^[a-z][a-z0-9]*(\.([a-z][a-z0-9]*|\*))+$")  # core's CRD validation
+    assert all(pattern.match(p) for p in spec["events"]["publish"])
+
+
+def test_table_events_can_be_turned_off_everywhere():
+    docs = render("--set", "tableEvents.enabled=false")
+    assert "events" not in one(docs, "BoothModule", "lakehouse")["spec"]
+    api = one(docs, "Deployment", f"{FULL}-api")
+    assert "booth-event-bus-credentials" not in {n for n, _ in secret_refs(api)}
+    assert all(v.get("secret", {}).get("secretName") != "booth-event-bus-credentials" for v in pod(api)["volumes"])
+
+
+def test_event_bus_credential_is_mounted_only_into_the_api_and_is_optional(api, lakekeeper):
+    (vol,) = [v for v in pod(api)["volumes"] if "secret" in v]
+    assert vol["secret"]["secretName"] == "booth-event-bus-credentials" and vol["secret"]["optional"] is True
+    env = env_of(pod(api)["containers"][0])
+    mount = next(m for m in pod(api)["containers"][0]["volumeMounts"] if m["name"] == vol["name"])
+    assert env["BOOTH_EVENTS_CREDS_FILE"]["value"] == mount["mountPath"] + "/nats.creds" and mount["readOnly"] is True
+    assert env["BOOTH_EVENTS_URL"]["valueFrom"]["secretKeyRef"] == {"name": "booth-event-bus-credentials", "key": "url", "optional": True}
+    assert not [v for v in pod(lakekeeper).get("volumes", []) if "secret" in v]
 
 
 def test_workload_identity_can_be_turned_off_everywhere():
@@ -129,6 +150,7 @@ def test_api_never_holds_lakekeepers_encryption_key(api):
     assert (f"{FULL}-lakekeeper", "encryption-key") not in refs
     assert refs == {
         ("booth-database-credentials", "dsn"),
+        ("booth-event-bus-credentials", "url"),
         ("booth-workload-minting-credentials", "issuer"),
         ("booth-workload-minting-credentials", "url"),
         ("booth-workload-minting-credentials", "credential"),

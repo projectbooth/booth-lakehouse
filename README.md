@@ -6,7 +6,8 @@ REST catalog (Rust, no JVM) behind a workspace-scoped, role-enforcing API, plus 
 so a notebook or pipeline task works with versioned, schema-evolving tables instead of hand-managed
 Parquet files.
 
-> **Status: first pass, pending booth-core's credential broker (ADR 0080).** Everything works end to
+> **Status: second pass (`table.*` events for booth-catalog, ADR 0085), still pending booth-core's
+> credential broker (ADR 0080).** Everything works end to
 > end against real Lakekeeper, Postgres and MinIO, and the chart deploys on kind. The broker used in
 > tests is a stand-in at a provisional wire shape, issuing *real* scoped MinIO credentials. See
 > [docs/decisions/0001](docs/decisions/0001-first-pass-design-and-broker-dependency.md) for what's
@@ -40,7 +41,7 @@ client ──Bearer, X-Workspace──▶ core gateway ──▶ API pod ──(
 
 | Component | Holds | Reachable from |
 |---|---|---|
-| **API** (`src/booth_lakehouse_server`, this repo's image) | DB DSN; workload-minting credential (renewals) | booth-core only |
+| **API** (`src/booth_lakehouse_server`, this repo's image) | DB DSN; workload-minting credential (renewals); event-bus credential (publish `table.*` only) | booth-core only |
 | **Lakekeeper** (upstream image, pinned by digest) | DB DSN; encryption key; each warehouse's current short-lived grant | the API pod only |
 | **client** (`client/`, package `booth_lakehouse`) | the caller's own token and per-table grants, in memory | — |
 
@@ -51,10 +52,14 @@ client ──Bearer, X-Workspace──▶ core gateway ──▶ API pod ──(
   session token); the API renews it before expiry as its own workload identity (ADR 0056).
 - `identity.py`: same verification and role derivation as the rest of the fleet (ADR 0041), plus
   core's workload issuer, since kernels and pipeline tasks are the expected callers.
+- `events.py`: publishes `table.created`/`updated`/`deleted` for booth-catalog (ADR 0085), which
+  registers each table as an `iceberg`-format dataset. A reconciler against Lakekeeper, at-least-once,
+  `updated` debounced to once a minute per table — [docs/decisions/0003](docs/decisions/0003-table-events-for-booth-catalog.md).
 
 ## Installing
 
-Requires booth-core (BoothModule CRD, `booth-database-credentials`, `booth-workload-minting-credentials`)
+Requires booth-core (BoothModule CRD, `booth-database-credentials`, `booth-workload-minting-credentials`,
+`booth-event-bus-credentials`)
 and, to do anything useful, booth-core's credential broker with booth-storage's `s3` provider (ADR 0080).
 
 ```sh
@@ -63,7 +68,7 @@ helm install lakehouse charts/booth-lakehouse -n booth-lakehouse \
 ```
 
 Key values: `identity.*` (trusted issuers), `broker.url` (default `<core.url>/api/credentials` —
-provisional), `workloadIdentity.enabled`, `warehouseCredential.*`, `core.namespaceSelector`/`podSelector`
+provisional), `workloadIdentity.enabled`, `tableEvents.*`, `warehouseCredential.*`, `core.namespaceSelector`/`podSelector`
 (must match your core install; they gate the API's ingress). **The NetworkPolicies need a CNI that
 enforces them** — Lakekeeper has no authentication of its own, so "only the API pod reaches it" is a
 real security boundary, not decoration.
@@ -77,6 +82,7 @@ ruff check src client tests
 pytest tests/unit tests/contract                       # layers 1-2 (contract tests need helm)
 
 docker compose -f hack/docker-compose.yml up -d --build --wait    # layer 3, real dependencies
+docker compose -f hack/docker-compose.yml build tests             # (a profile service; `up --build` skips it)
 docker compose -f hack/docker-compose.yml run --rm tests          # BOOTH_SLOW=1 adds the ~16-min expiry test
 docker compose -f hack/docker-compose.yml down -v
 
@@ -85,9 +91,9 @@ sh hack/kind-integration.sh                            # layer 3 on kind: docker
 
 | Suite | What it proves |
 |---|---|
-| `tests/unit` | token verification + role derivation, every proxy rule, response scrubbing, broker adapter (scope echo, refusals, no secret in repr/logs), warehouse create/renew, the HTTP app with a fake Lakekeeper, client location→`{backendId, path}` mapping and grant caching |
+| `tests/unit` | the `table.*` publisher's decisions (created/updated/deleted, rename, drop-recreate, debounce, never-delete-on-doubt, ack-before-record), token verification + role derivation, every proxy rule, response scrubbing, broker adapter (scope echo, refusals, no secret in repr/logs), warehouse create/renew, the HTTP app with a fake Lakekeeper, client location→`{backendId, path}` mapping and grant caching |
 | `tests/contract` | the BoothModule manifest vs. module-manifest.md; who holds which Secret; no static storage credential anywhere; NetworkPolicies; digest-pinned Lakekeeper |
-| `tests/integration` (compose) | **real Lakekeeper + Postgres + MinIO + this API image**, through the real client: create/append/read, time travel, schema evolution, DuckDB, roles, cross-workspace isolation, per-table grants refused by MinIO outside their table, credential renewal |
+| `tests/integration` (compose) | **real Lakekeeper + Postgres + MinIO + NATS JetStream (core's JWT mode) + this API image**, through the real client: create/append/read, time travel, schema evolution, DuckDB, roles, cross-workspace isolation, per-table grants refused by MinIO outside their table, credential renewal, `table.*` events read back as booth-catalog would, the bus refusing any other event type |
 | `hack/kind-integration.sh` | the chart on kind with booth-core's real CRD; the same suite in-cluster; state survives restarting both Deployments |
 
 CI: `.github/workflows/ci.yml` (layers 1–2 + image build, every push/PR, required on `main` via branch
@@ -97,5 +103,8 @@ protection), `.github/workflows/integration.yml` (layer 3, merge to `main` and n
 
 - [0001](docs/decisions/0001-first-pass-design-and-broker-dependency.md): design, judgment calls for
   ratification, the provisional broker shape and the asks for booth-core/booth-storage.
-- [0002](docs/decisions/0002-proposal-iceberg-tables-in-booth-catalog.md): proposal (not built) for
-  how tables surface in booth-catalog.
+- [0002](docs/decisions/0002-proposal-iceberg-tables-in-booth-catalog.md): the booth-catalog proposal —
+  ruled Option A (ADR 0085).
+- [0003](docs/decisions/0003-table-events-for-booth-catalog.md): the `table.*` publisher.
+
+Ratified upstream: ADR 0084 (the first pass's judgment calls), ADR 0085 (tables as `iceberg`-format datasets).

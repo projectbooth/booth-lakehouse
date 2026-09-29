@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from booth_lakehouse_server.app import Components, create_app
 from booth_lakehouse_server.lakekeeper import Lakekeeper
 from booth_lakehouse_server.store import MemoryStore
+from booth_lakehouse_server.tables import TableReader
 from booth_lakehouse_server.warehouses import Warehouses
 
 from .fakes import FakeBroker, FakeLakekeeper
@@ -27,6 +28,9 @@ class Catalog:
         self.requests: list[httpx.Request] = []
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
+        return self.answer(request)
+
+    def answer(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         path = request.url.path
         if path == "/catalog/v1/config":
@@ -55,7 +59,8 @@ def env():
     broker = FakeBroker()
     wh = Warehouses(store, lakekeeper, lambda tok: broker, None)
     cat = Catalog()
-    app = create_app(Components(verifier(idp), store, lakekeeper, wh), run_renewals=False, catalog_transport=httpx.MockTransport(cat.handle))
+    reader = TableReader("http://lk", transport=httpx.MockTransport(cat.answer))
+    app = create_app(Components(verifier(idp), store, lakekeeper, wh, reader), run_renewals=False, catalog_transport=httpx.MockTransport(cat.handle))
     client = TestClient(app)
     owner = {"Authorization": "Bearer " + idp.token(sub="alice", groups=["/workspaces/acme/owner"]), "X-Workspace": "acme"}
     r = client.put("/api/warehouse", json={"backendId": "lake", "path": "lakehouse"}, headers=owner)
@@ -70,7 +75,7 @@ def h(role="editor", ws="acme", **extra):
 
 def test_health_follows_lakekeeper(env):
     client, *_ = env
-    assert client.get("/health").json() == {"status": "ok", "lakekeeper": "ok"}
+    assert client.get("/health").json() == {"status": "ok", "lakekeeper": "ok", "tableEvents": "disabled"}
 
 
 def test_warehouse_is_visible_to_any_member_and_never_carries_a_credential(env):

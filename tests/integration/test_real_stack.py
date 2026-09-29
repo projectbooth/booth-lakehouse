@@ -41,7 +41,7 @@ def _name(prefix: str = "t") -> str:
 
 def test_health_reflects_real_lakekeeper():
     status, doc = http("GET", f"{API}/health")
-    assert status == 200 and doc == {"status": "ok", "lakekeeper": "ok"}
+    assert status == 200 and doc["status"] == "ok" and doc["lakekeeper"] == "ok"
 
 
 def test_no_warehouse_means_a_clear_error_not_a_crash(tokens):

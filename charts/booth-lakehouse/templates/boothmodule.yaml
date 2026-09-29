@@ -29,7 +29,16 @@ spec:
   workloadIdentity:
     mint: true
   {{- end }}
-  # No `events` (ADR 0050): v0 neither publishes nor subscribes.
+  {{- if .Values.tableEvents.enabled }}
+  # ADR 0085: table lifecycle events for booth-catalog, which registers each table as an
+  # `iceberg`-format dataset. Core derives a publish-only credential for booth.*.table.<verb>
+  # from exactly this list (ADR 0050) and provisions it as booth-event-bus-credentials.
+  events:
+    publish:
+      - table.created
+      - table.updated
+      - table.deleted
+  {{- end }}
   serviceRef:
     name: {{ include "booth-lakehouse.fullname" . }}-api
     port: 8080

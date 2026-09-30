@@ -106,5 +106,7 @@ protection), `.github/workflows/integration.yml` (layer 3, merge to `main` and n
 - [0002](docs/decisions/0002-proposal-iceberg-tables-in-booth-catalog.md): the booth-catalog proposal —
   ruled Option A (ADR 0085).
 - [0003](docs/decisions/0003-table-events-for-booth-catalog.md): the `table.*` publisher.
+- [0004](docs/decisions/0004-minio-test-image-built-from-source.md): the shared MinIO test image
+  (`ghcr.io/projectbooth/minio-test`, built from source, pinned by digest).
 
 Ratified upstream: ADR 0084 (the first pass's judgment calls), ADR 0085 (tables as `iceberg`-format datasets).

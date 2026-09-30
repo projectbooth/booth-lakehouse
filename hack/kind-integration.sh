@@ -41,10 +41,11 @@ trap cleanup EXIT
 echo "---- images"
 docker build -q -t booth-lakehouse:it .
 docker build -q -t booth-lakehouse-tests:it -f tests/integration/Dockerfile .
-# Third-party images go through the local docker cache too: quay.io/minio/minio now answers anonymous
-# pulls with 401 (found on this script's first run), so the node can't always pull it itself.
+# Postgres and Lakekeeper are preloaded from the local docker cache (faster, and the Lakekeeper pin is
+# digest-only). MinIO is NOT: the node pulls ghcr.io/projectbooth/minio-test by digest itself — a
+# public, source-built mirror (ADR 0087/0091), since quay.io/minio/minio stopped serving anonymous pulls.
 LAKEKEEPER_IMAGE=$(grep -o 'quay.io/lakekeeper/catalog@sha256:[0-9a-f]*' charts/booth-lakehouse/values.yaml)
-for img in postgres:16-alpine quay.io/minio/minio:latest "$LAKEKEEPER_IMAGE"; do
+for img in postgres:16-alpine "$LAKEKEEPER_IMAGE"; do
   docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img"
 done
 # A digest-only reference can't be `kind load`ed by name: tag it, and point the chart at the tag.
@@ -52,7 +53,7 @@ docker tag "$LAKEKEEPER_IMAGE" lakekeeper:it
 # Not `kind load`: with docker's containerd image store it imports --all-platforms, which fails on a
 # multi-platform index whose other platforms were never pulled ("content digest ... not found").
 PLATFORM=linux/$(docker version -f '{{.Server.Arch}}')
-for img in booth-lakehouse:it booth-lakehouse-tests:it postgres:16-alpine quay.io/minio/minio:latest lakekeeper:it; do
+for img in booth-lakehouse:it booth-lakehouse-tests:it postgres:16-alpine lakekeeper:it; do
   docker save --platform "$PLATFORM" "$img" | docker exec -i "$CLUSTER-control-plane" ctr --namespace=k8s.io images import --snapshotter=overlayfs -
 done
 

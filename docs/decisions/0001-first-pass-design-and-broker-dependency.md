@@ -143,9 +143,9 @@ cover the table. Asks, each found by building against real dependencies, not ass
   client's own settings. The proxy strips it and the client builds FileIO from the broker grant only.
 - The upstream Lakekeeper image sets **no USER** — it runs as root by default. The chart pins UID
   65532 (its distroless `nonroot`), verified on kind.
-- `quay.io/minio/minio:latest` now answers anonymous pulls with **401**. Test tooling loads it from the
-  local Docker cache; **CI's integration workflow will fail to pull it** until a mirrored/pinned MinIO
-  image is chosen. Worth a fleet-wide note: booth-storage's own emulator setup uses the same image.
+- `quay.io/minio/minio:latest` now answers anonymous pulls with **401**. Resolved by ADR 0087/0091: a
+  source-built, digest-pinned mirror at `ghcr.io/projectbooth/minio-test`, shared with booth-storage
+  (docs/decisions/0004).
 - Current kind (kindnet) **does enforce NetworkPolicy**. `hack/kind-integration.sh` asserts it: an
   unlabelled pod reaches neither the API nor Lakekeeper; a "core" pod reaches the API but not Lakekeeper.
 

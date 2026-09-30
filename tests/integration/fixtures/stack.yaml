@@ -42,7 +42,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio:latest
+          image: ghcr.io/projectbooth/minio-test@sha256:04c918e8877a410f40ccab0842f724177af453f236a5fda96df219867aefe3c3 # ADR 0087/0091
           imagePullPolicy: IfNotPresent
           args: ["server", "/data"]
           env:

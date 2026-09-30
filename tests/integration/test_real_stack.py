@@ -275,7 +275,7 @@ def _warehouse_leases() -> list[dict]:
 
 
 def test_zz_warehouse_credential_is_renewed_as_the_modules_own_identity(acme, tokens):
-    """The API renews inside a 930 s margin of a 960 s credential, i.e. ~30 s after creation. The
+    """The API asks 300 s (the broker ceiling); MinIO's floor grants ~905 s; an 880 s margin renews ~25 s in. The
     renewal is requested with a workload token core minted for this module (no person present),
     for exactly the same scope, and Lakekeeper keeps working on the new credential (it writes table
     metadata with its own credential on every create)."""

@@ -83,7 +83,7 @@ helm --kube-context "$CTX" upgrade --install "$RELEASE" charts/booth-lakehouse -
   --set identity.workloadIssuerUrl=http://fakecore:9090 \
   --set broker.url=http://fakecore:9090/api/credentials \
   -f tests/integration/fixtures/kind-values.yaml \
-  --set warehouseCredential.ttlSeconds=960 --set warehouseCredential.renewMarginSeconds=930 \
+  --set warehouseCredential.ttlSeconds=300 --set warehouseCredential.renewMarginSeconds=880 \
   --set warehouseCredential.renewIntervalSeconds=5
 k -n "$NS" get boothmodule lakehouse -o jsonpath='{.spec.id} {.spec.healthCheckPath} {.spec.serviceRef.name}{"\n"}'
 

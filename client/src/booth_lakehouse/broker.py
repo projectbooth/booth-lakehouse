@@ -1,11 +1,10 @@
 """The consumer side of the ADR 0080 credential broker, for the ``s3`` kind — the only place in this
 module that knows the broker's wire shape.
 
-**The wire shape here is provisional.** ``contracts/credential-broker.md`` fixes the broker's hard
-requirements (authorize first, mandatory short TTL, never log the value, refuse rather than widen)
-but leaves the request/response shape to booth-core, which hadn't built it when this was written
-(docs/decisions/0001). Everything below the ``HttpBroker`` class works with ``S3Grant`` only, so
-adopting core's real shape means changing ``HttpBroker._request``/``_parse`` and nothing else.
+The wire shape is ADR 0088's (booth-core's broker, ``POST /api/credentials``): ``{kind, ttlSeconds,
+access, scope, options}`` → ``{leaseId, kind, expiresAt, scope, credential}``, with booth-storage's
+``s3`` provider defining ``scope``/``options``/``credential``. Everything below ``HttpBroker`` works
+with ``S3Grant`` only, so a future shape change stays inside ``HttpBroker._request``/``_parse``.
 
 A grant carries its own resolved location (endpoint, bucket, key prefix): the provider
 (booth-storage) is the only thing that knows how a ``{backendId, path}`` pair (ADR 0045) maps onto a
@@ -118,6 +117,10 @@ class HttpBroker(Broker):
             raise ValueError(f"unknown access mode {access!r}")
         body = {
             "kind": "s3",
+            # ADR 0088: `access` is a top-level field — the broker authorizes on it (readwrite needs
+            # editor/owner) without reading the per-kind `scope`. The copy inside scope is harmless
+            # (providers ignore unknown scope fields) and mirrors the echo _parse checks.
+            "access": access,
             "scope": {"backendId": backend_id, "path": path, "access": access},
             "ttlSeconds": int(ttl_seconds),
             "options": {"sessionToken": "forbidden" if static_key else "allowed"},

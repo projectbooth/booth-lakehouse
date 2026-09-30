@@ -34,7 +34,13 @@ def test_request_is_made_as_the_caller_with_mandatory_ttl():
     g = HttpBroker("http://core/api/credentials", lambda: "caller-token", op).issue_s3("acme", "lake", "/lakehouse/t1/", "read", 900)
     req = op.requests[0]
     assert req.get_header("Authorization") == "Bearer caller-token" and req.get_header("X-workspace") == "acme"
-    assert json.loads(req.data) == {"kind": "s3", "scope": {"backendId": "lake", "path": "/lakehouse/t1/", "access": "read"}, "ttlSeconds": 900, "options": {"sessionToken": "allowed"}}
+    assert json.loads(req.data) == {
+        "kind": "s3",
+        "access": "read",  # top-level, as the broker authorizes on it (ADR 0088)
+        "scope": {"backendId": "lake", "path": "/lakehouse/t1/", "access": "read"},
+        "ttlSeconds": 900,
+        "options": {"sessionToken": "allowed"},
+    }
     assert (g.bucket, g.key_prefix, g.session_token, g.root_uri) == ("lake", "acme/lakehouse/t1", "ST", "s3://lake/acme/lakehouse/t1")
     assert g.fileio_properties()["s3.session-token"] == "ST"
 
@@ -42,7 +48,8 @@ def test_request_is_made_as_the_caller_with_mandatory_ttl():
 def test_static_key_is_requested_explicitly():
     op = Opener(doc=response(scope={"backendId": "lake", "path": "lakehouse/t1", "access": "readwrite"}))
     HttpBroker("http://core/api/credentials", lambda: "t", op).issue_s3("acme", "lake", "lakehouse/t1", "readwrite", 60, static_key=True)
-    assert json.loads(op.requests[0].data)["options"] == {"sessionToken": "forbidden"}
+    sent = json.loads(op.requests[0].data)
+    assert sent["options"] == {"sessionToken": "forbidden"} and sent["access"] == "readwrite"
 
 
 @pytest.mark.parametrize("scope", [

@@ -18,8 +18,10 @@ class Settings:
     broker_url: str = ""
     workload_mint_url: str = ""
     workload_mint_credential: str = field(default="", repr=False)
-    warehouse_ttl_seconds: int = 3600
-    renew_margin_seconds: int = 900
+    # ADR 0088: the broker caps a request at 300 s; a provider can grant longer (MinIO: >= 15 min).
+    # The margin must stay well under the shortest grant, or every pass renews.
+    warehouse_ttl_seconds: int = 300
+    renew_margin_seconds: int = 120
     renew_interval_seconds: int = 60
     events_url: str = ""
     events_creds_file: str = ""
@@ -45,8 +47,8 @@ class Settings:
             broker_url=env.get("BOOTH_CREDENTIAL_BROKER_URL", ""),
             workload_mint_url=env.get("BOOTH_WORKLOAD_MINT_URL", ""),
             workload_mint_credential=env.get("BOOTH_WORKLOAD_MINT_CREDENTIAL", ""),
-            warehouse_ttl_seconds=int(env.get("WAREHOUSE_CREDENTIAL_TTL_SECONDS", "3600")),
-            renew_margin_seconds=int(env.get("WAREHOUSE_CREDENTIAL_RENEW_MARGIN_SECONDS", "900")),
+            warehouse_ttl_seconds=int(env.get("WAREHOUSE_CREDENTIAL_TTL_SECONDS", "300")),
+            renew_margin_seconds=int(env.get("WAREHOUSE_CREDENTIAL_RENEW_MARGIN_SECONDS", "120")),
             renew_interval_seconds=int(env.get("WAREHOUSE_CREDENTIAL_RENEW_INTERVAL_SECONDS", "60")),
             # ADR 0050's booth-event-bus-credentials (url + nats.creds). Empty URL = no table.* events.
             events_url=env.get("BOOTH_EVENTS_URL", ""),

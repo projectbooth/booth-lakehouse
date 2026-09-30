@@ -113,10 +113,10 @@ services:
       BOOTH_CREDENTIAL_BROKER_URL: http://fakecore:9090/api/credentials
       BOOTH_WORKLOAD_MINT_URL: http://fakecore:9090/api/internal/workload-tokens
       BOOTH_WORKLOAD_MINT_CREDENTIAL: test-mint-credential
-      # Renew almost immediately (MinIO's floor for an expiring key is 15 min, so the TTL can't be
-      # shorter): the renewal test sees a real rotation within ~30 s.
-      WAREHOUSE_CREDENTIAL_TTL_SECONDS: "960"
-      WAREHOUSE_CREDENTIAL_RENEW_MARGIN_SECONDS: "930"
+      # Asks 300 s (the broker ceiling); MinIO's floor grants ~905 s; an 880 s margin renews ~25 s
+      # after creation, so the renewal test sees a real rotation quickly.
+      WAREHOUSE_CREDENTIAL_TTL_SECONDS: "300"
+      WAREHOUSE_CREDENTIAL_RENEW_MARGIN_SECONDS: "880"
       WAREHOUSE_CREDENTIAL_RENEW_INTERVAL_SECONDS: "5"
       # ADR 0050: the credential core would provision from this module's manifest `events`.
       BOOTH_EVENTS_URL: nats://nats:4222

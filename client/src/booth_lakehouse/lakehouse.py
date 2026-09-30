@@ -37,10 +37,11 @@ from typing import Any
 
 from .broker import READ, READWRITE, Broker, BrokerError, HttpBroker, S3Grant
 
-# How long a requested storage credential lives, and how close to expiry one is replaced. The
-# broker may cap the TTL lower (ADR 0080 requires a strict ceiling); the margin keeps a read or a
+# How long a requested storage credential lives, and how close to expiry one is replaced. 300 s is
+# the broker's ceiling (ADR 0088: asking for more is clamped down); a provider may still grant longer
+# (MinIO's floor is 15 min) - the grant's expiresAt is what counts. The margin keeps a read or a
 # commit from starting on a credential that dies mid-flight.
-DEFAULT_TTL_SECONDS = 900
+DEFAULT_TTL_SECONDS = 300
 RENEW_MARGIN_SECONDS = 120
 
 

@@ -48,7 +48,7 @@ MINIO_USER = os.environ.get("MINIO_ROOT_USER", "booth-test")
 MINIO_PASSWORD = os.environ.get("MINIO_ROOT_PASSWORD", "booth-test-secret")
 MINT_CREDENTIAL = os.environ.get("FAKECORE_MINT_CREDENTIAL", "test-mint-credential")
 BACKENDS = json.loads(os.environ.get("FAKECORE_BACKENDS", "{}"))
-TTL_CEILING = int(os.environ.get("FAKECORE_TTL_CEILING", "3600"))
+TTL_CEILING = int(os.environ.get("FAKECORE_TTL_CEILING", "300"))  # core's DefaultMaxTTL (ADR 0088)
 
 KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 KID = "fakecore-1"
@@ -100,7 +100,12 @@ def issue(claims: dict, workspace: str, body: dict) -> tuple[int, dict]:
     if body.get("kind") != "s3":
         return 400, {"error": "unknown_kind", "message": "only s3 here"}
     scope = body.get("scope") or {}
-    backend_id, path, access = scope.get("backendId", ""), str(scope.get("path", "")).strip("/"), scope.get("access")
+    # ADR 0088: `access` is top-level and the only place the broker (and booth-storage's provider)
+    # reads it; a request without it is a 400, exactly like the real provider.
+    access = body.get("access")
+    if access not in ("read", "readwrite"):
+        return 400, {"error": "invalid_request", "message": 'access must be "read" or "readwrite"'}
+    backend_id, path = scope.get("backendId", ""), str(scope.get("path", "")).strip("/")
     role = role_of(claims, workspace)
     need = "editor" if access == "readwrite" else "viewer"
     if access not in ("read", "readwrite") or not path or ".." in path.split("/"):

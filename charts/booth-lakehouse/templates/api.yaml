@@ -74,6 +74,8 @@ spec:
             - name: TABLE_EVENTS_UPDATE_MIN_GAP_SECONDS
               value: {{ .Values.tableEvents.updateMinGapSeconds | quote }}
             {{- end }}
+            - name: BOOTH_LAKEHOUSE_OPERATOR_WORKSPACES
+              value: {{ join "," .Values.access.operatorWorkspaces | quote }}
             - name: WAREHOUSE_CREDENTIAL_TTL_SECONDS
               value: {{ .Values.warehouseCredential.ttlSeconds | quote }}
             - name: WAREHOUSE_CREDENTIAL_RENEW_MARGIN_SECONDS

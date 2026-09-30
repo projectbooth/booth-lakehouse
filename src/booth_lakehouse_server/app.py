@@ -4,6 +4,9 @@
 - ``GET  /api/warehouse``              — this workspace's warehouse (any role), 404 if none yet.
 - ``PUT  /api/warehouse``              — owner: create it at ``{backendId, path}`` (ADR 0045).
 - ``GET  /api/tables``                 — every table in this workspace's warehouse.
+- ``GET  /api/admin/warehouses``       — the admin view (ADR 0093): warehouses with cheap status,
+                                         own workspace for editors/owners, every workspace for an
+                                         owner in an operator workspace (admin.py). Read-only.
 - ``GET  /api/tables/{ns}/{table}``    — one table: schema, location as ``{backendId, path}``,
                                          snapshots. Minus snapshots, the ``table.*`` event payload
                                          booth-catalog registers (ADR 0085, events.py).
@@ -28,7 +31,7 @@ from pydantic import BaseModel
 
 from booth_lakehouse.broker import Broker, HttpBroker
 
-from . import proxy
+from . import admin, proxy
 from .config import Settings
 from .events import NatsPublisher, TableEvents, run_forever
 from .identity import AuthError, Forbidden, Identity, Verifier, resolve
@@ -55,6 +58,7 @@ class Components:
     renew_interval_seconds: int = 60
     events: TableEvents | None = None
     events_interval_seconds: float = 10
+    operator_workspaces: frozenset[str] = frozenset()
 
 
 def components_from_settings(s: Settings) -> Components:
@@ -75,7 +79,9 @@ def components_from_settings(s: Settings) -> Components:
         events = TableEvents(store, reader, NatsPublisher(s.events_url, s.events_creds_file), s.events_update_min_gap_seconds)
     else:
         log.warning("BOOTH_EVENTS_URL is empty: no table.* events, so booth-catalog won't learn about tables (ADR 0085)")
-    return Components(Verifier(s.issuers, s.groups_claim), store, lk, wh, reader, s.renew_interval_seconds, events, s.events_interval_seconds)
+    if not s.operator_workspaces:
+        log.info("admin view: no operator workspaces configured, so each caller sees only their own workspace's warehouse")
+    return Components(Verifier(s.issuers, s.groups_claim), store, lk, wh, reader, s.renew_interval_seconds, events, s.events_interval_seconds, s.operator_workspaces)
 
 
 class WarehouseRequest(BaseModel):
@@ -151,6 +157,25 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
         if b is None:
             raise HTTPException(404, f"workspace {who.workspace!r} has no warehouse yet")
         return b
+
+    @app.get("/api/admin/warehouses")
+    async def admin_warehouses(who: Identity = Depends(identity)):
+        try:
+            access = admin.decide(who, c.operator_workspaces)
+        except Forbidden as e:
+            raise HTTPException(403, str(e)) from None
+        if access.scope == admin.ALL:
+            bindings = await asyncio.to_thread(c.store.all)
+        else:
+            own = c.warehouses.get(who.workspace)
+            bindings = [own] if own else []
+        now = c.warehouses.clock()
+        margin = c.warehouses.renew_margin_seconds
+        rows = []
+        for b in bindings:
+            stats = await asyncio.to_thread(admin.table_stats, c.lakekeeper.http, b.warehouse_id)
+            rows.append(admin.row(b, now, margin, stats))
+        return {"scope": access.scope, "items": rows}
 
     @app.get("/api/tables")
     async def list_tables(who: Identity = Depends(identity)):

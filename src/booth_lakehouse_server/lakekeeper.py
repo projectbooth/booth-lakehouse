@@ -66,6 +66,10 @@ class Lakekeeper:
     def close(self) -> None:
         self._http.close()
 
+    @property
+    def http(self) -> httpx.Client:
+        return self._http
+
     def _check(self, resp: httpx.Response, what: str) -> httpx.Response:
         if resp.status_code >= 400:
             kind, msg = "", resp.text[:300]

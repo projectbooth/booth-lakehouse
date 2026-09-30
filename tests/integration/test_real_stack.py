@@ -267,6 +267,34 @@ def test_beta_warehouse_lives_in_betas_own_backend(acme, tokens):
     assert status == 200 and doc["storageRoot"] == "s3://lake/beta-data/lakehouse"
 
 
+# ---- the admin view (ADR 0093) ----------------------------------------------------------------
+
+
+def test_admin_view_reports_real_lakekeeper_table_counts(acme, tokens):
+    """One cheap Lakekeeper statistics call per warehouse, and it must reflect the tables that exist
+    right now (so page 1 of Lakekeeper's statistics really is the newest entry)."""
+    lh = lakehouse("acme", tokens["editor"])
+    lh.create_table(f"admin.{_name()}", [{"v": 1}])
+    expected = len(lh.tables())
+    status, doc = http("GET", f"{GW}/api/admin/warehouses", headers=_h(tokens["editor"]))
+    assert status == 200 and doc["scope"] == "workspace"
+    (item,) = doc["items"]
+    assert item["workspace"] == "acme" and item["location"] == {"backendId": "lake", "path": "lakehouse"}
+    assert item["tables"]["tables"] == expected
+    assert item["credential"]["status"] in ("ok", "renewing")
+    assert http("GET", f"{GW}/api/admin/warehouses", headers=_h(tokens["viewer"]))[0] == 403
+
+
+def test_admin_view_operator_sees_every_workspace(acme, tokens):
+    ops_owner = token(OWNER_SUB, "/workspaces/ops/owner")
+    status, doc = http("GET", f"{GW}/api/admin/warehouses", headers=_h(ops_owner, "ops"))
+    assert status == 200 and doc["scope"] == "all"
+    assert {"acme", "beta"} <= {i["workspace"] for i in doc["items"]}
+    # beta's editor, not in an operator workspace, sees only beta.
+    status, doc = http("GET", f"{GW}/api/admin/warehouses", headers=_h(tokens["beta_editor"], "beta"))
+    assert [i["workspace"] for i in doc["items"]] == ["beta"]
+
+
 # ---- credential renewal -----------------------------------------------------------------------
 
 

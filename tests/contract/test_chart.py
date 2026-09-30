@@ -90,10 +90,21 @@ def test_manifest_required_fields(chart, spec):
     assert spec["healthCheckPath"] == "/health"
 
 
-def test_no_ui_in_v0_so_no_ui_fields(spec):
-    assert spec["hasOwnUi"] is False
-    for field in ("uiIntegrationMode", "navPath", "navGroup", "adminNavPath"):
-        assert field not in spec
+def test_one_native_manage_view_and_no_admin_split(spec):
+    """ADR 0093: a single native view under navPath, no adminNavPath (module-manifest.md UI rules)."""
+    assert spec["hasOwnUi"] is True
+    assert spec["uiIntegrationMode"] == "native"
+    assert spec["navGroup"] == "manage"
+    assert spec["navPath"] == "/lakehouse"
+    assert "adminNavPath" not in spec
+
+
+def test_operator_workspaces_default_to_none(api):
+    """Fail closed: nobody sees another tenant's warehouse unless an operator names workspaces."""
+    assert env_of(pod(api)["containers"][0])["BOOTH_LAKEHOUSE_OPERATOR_WORKSPACES"]["value"] == ""
+    docs = render("--set", "access.operatorWorkspaces={ops,platform}")
+    api2 = one(docs, "Deployment", f"{FULL}-api")
+    assert env_of(pod(api2)["containers"][0])["BOOTH_LAKEHOUSE_OPERATOR_WORKSPACES"]["value"] == "ops,platform"
 
 
 def test_declares_database_workload_identity_and_exactly_the_table_events(spec):

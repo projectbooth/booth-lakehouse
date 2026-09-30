@@ -29,6 +29,20 @@ lh.tables()
 A workspace owner creates the workspace's warehouse once, by choosing where its tables live in
 booth-storage: `lh.create_warehouse("lake", "lakehouse")` (a `{backendId, path}` pair, ADR 0045).
 
+## The admin view
+
+A single read-only native view under **Manage** (`/lakehouse`, ADR 0093), from
+`@projectbooth/lakehouse-ui` (`web/`): each warehouse's location, creator, storage-credential state and
+table count. Editors/owners see their own workspace; owners acting in a workspace listed in
+`access.operatorWorkspaces` see every workspace. No create/delete actions.
+
+```sh
+cd web && npm ci && npm run dev      # dev harness against BOOTH_LAKEHOUSE_DEV_BACKEND (default :8080)
+npm run typecheck && npm run lint && npm test -- --run && npm run build
+```
+
+Published to GitHub Packages by pushing a `lakehouse-ui-v<version>` tag (`.github/workflows/publish-ui.yml`).
+
 ## How it fits together
 
 ```
@@ -67,8 +81,8 @@ helm install lakehouse charts/booth-lakehouse -n booth-lakehouse \
   --set identity.oidcIssuerUrl=https://keycloak.example/realms/booth
 ```
 
-Key values: `identity.*` (trusted issuers), `broker.url` (default `<core.url>/api/credentials` —
-provisional), `workloadIdentity.enabled`, `tableEvents.*`, `warehouseCredential.*`, `core.namespaceSelector`/`podSelector`
+Key values: `identity.*` (trusted issuers), `broker.url` (default `<core.url>/api/credentials`),
+`workloadIdentity.enabled`, `tableEvents.*`, `access.operatorWorkspaces` (admin view), `warehouseCredential.*`, `core.namespaceSelector`/`podSelector`
 (must match your core install; they gate the API's ingress). **The NetworkPolicies need a CNI that
 enforces them** — Lakekeeper has no authentication of its own, so "only the API pod reaches it" is a
 real security boundary, not decoration.
@@ -106,6 +120,8 @@ protection), `.github/workflows/integration.yml` (layer 3, merge to `main` and n
 - [0002](docs/decisions/0002-proposal-iceberg-tables-in-booth-catalog.md): the booth-catalog proposal —
   ruled Option A (ADR 0085).
 - [0003](docs/decisions/0003-table-events-for-booth-catalog.md): the `table.*` publisher.
+- [0005](docs/decisions/0005-read-only-admin-view.md): the read-only admin view (ADR 0093) and
+  `@projectbooth/lakehouse-ui`.
 - [0004](docs/decisions/0004-minio-test-image-built-from-source.md): the shared MinIO test image
   (`ghcr.io/projectbooth/minio-test`, built from source, pinned by digest).
 

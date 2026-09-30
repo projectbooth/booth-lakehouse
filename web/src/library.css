@@ -1,0 +1,5 @@
+/* Library entry stylesheet (@projectbooth/lakehouse-ui): no `@tailwind base` (Tailwind's global
+   reset) — a second global reset from a dependency would fight booth-design's own base styles once
+   mounted in its shell. The dev harness (src/styles.css, src/main.tsx only) keeps the full reset. */
+@tailwind components;
+@tailwind utilities;

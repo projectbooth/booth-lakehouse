@@ -78,7 +78,8 @@ engine (notebook kernel, pipeline task) ──Bearer, X-Workspace──▶ booth
    never share one prefix.
 
 7. **No UI in v0** (`hasOwnUi: false`), although the brief files the module under Manage — what a UI
-   should expose is open question 2 below.
+   should expose is open question 2 below. **Closed (ADR 0093, 2026-09-30):** a read-only admin view,
+   see 0005.
 
 8. **Notebook token discovery** reaches into `booth._default._http.token` (private) when running in a
    booth-notebooks kernel. booth-notebooks should expose a public token accessor; until then this is

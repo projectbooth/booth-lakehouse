@@ -6,3 +6,7 @@ core:
   podSelector:
     app.kubernetes.io/name: null   # drop the chart default (booth-core's own label)
     booth-it/core: "true"
+
+# The suite's operator-view test (ADR 0093): owners acting in "ops" see every workspace's warehouse.
+access:
+  operatorWorkspaces: [ops]

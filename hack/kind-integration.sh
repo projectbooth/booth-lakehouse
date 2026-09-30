@@ -113,7 +113,15 @@ spec:
             - {name: MINIO_ENDPOINT, value: "http://minio:9000"}
             - {name: ${2%%=*}, value: "${2#*=}"}
 EOF
-  if ! k -n "$NS" wait --for=condition=complete "job/lakehouse-$1" --timeout=15m; then
+  # Wait for Complete OR Failed: waiting on Complete alone sits out the whole timeout when a test fails.
+  deadline=$(( $(date +%s) + 900 ))
+  while :; do
+    done_=$(k -n "$NS" get "job/lakehouse-$1" -o jsonpath='{.status.succeeded}{.status.failed}')
+    [ -n "$done_" ] && break
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 5
+  done
+  if [ "$(k -n "$NS" get "job/lakehouse-$1" -o jsonpath='{.status.succeeded}')" != "1" ]; then
     k -n "$NS" logs "job/lakehouse-$1" --tail=300
     return 1
   fi

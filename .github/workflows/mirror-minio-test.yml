@@ -1,0 +1,66 @@
+name: Publish MinIO test image
+
+# ADR 0087 as amended by ADR 0091: builds MinIO + mc FROM SOURCE at pinned upstream release tags and
+# publishes the result to ghcr.io/projectbooth/minio-test, for booth-lakehouse's and booth-storage's
+# integration tests. Consumers pin the DIGEST this prints, never a tag.
+#
+# Refuses to publish unless what it built is what was asked for (hack/minio-test/Dockerfile):
+#  - each tag must resolve to exactly the given commit (a moved or re-pointed tag fails the build);
+#  - each built binary must report exactly the given release;
+#  - the image must then actually serve: MinIO answers its readiness probe and `mc` can talk to it.
+#
+# Current pin (docs/decisions/0004): MinIO RELEASE.2025-10-15T17-29-55Z @ 9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a,
+# mc RELEASE.2025-08-13T08-35-41Z @ 7394ce0dd2a80935aded936b09fa12cbb3cb8096 — both repos are archived
+# upstream, so these are their final releases.
+#
+# Local equivalent: docker build hack/minio-test --build-arg MINIO_TAG=... (same four build args).
+on:
+  workflow_dispatch:
+    inputs:
+      minio_tag:
+        description: MinIO server release tag (e.g. RELEASE.2025-10-15T17-29-55Z)
+        required: true
+      minio_commit:
+        description: The commit that tag must resolve to
+        required: true
+      mc_tag:
+        description: mc release tag
+        required: true
+      mc_commit:
+        description: The commit that tag must resolve to
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/projectbooth/minio-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build from source (refuses on a tag/commit or version mismatch)
+        run: |
+          docker build -t minio-test:candidate \
+            --build-arg MINIO_TAG="${{ inputs.minio_tag }}" --build-arg MINIO_COMMIT="${{ inputs.minio_commit }}" \
+            --build-arg MC_TAG="${{ inputs.mc_tag }}" --build-arg MC_COMMIT="${{ inputs.mc_commit }}" \
+            hack/minio-test
+      - name: Refuse unless it actually serves
+        run: |
+          docker run -d --name m -e MINIO_ROOT_USER=probe -e MINIO_ROOT_PASSWORD=probe-secret minio-test:candidate
+          for i in $(seq 1 30); do docker exec m mc ready local >/dev/null 2>&1 && break; sleep 1; done
+          docker exec m mc ready local
+          docker exec m sh -c 'mc alias set p http://127.0.0.1:9000 probe probe-secret >/dev/null && mc mb p/probe && mc ls p'
+          docker rm -f m
+      - name: Push
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag minio-test:candidate "$IMAGE:${{ inputs.minio_tag }}"
+          docker push "$IMAGE:${{ inputs.minio_tag }}" | tee push.log
+          digest=$(grep -o 'digest: sha256:[0-9a-f]\{64\}' push.log | tail -1 | cut -d' ' -f2)
+          test -n "$digest"
+          echo "PINNED $IMAGE@$digest"
+          echo "### Published \`$IMAGE@$digest\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "MinIO ${{ inputs.minio_tag }} (${{ inputs.minio_commit }}), mc ${{ inputs.mc_tag }} (${{ inputs.mc_commit }})" >> "$GITHUB_STEP_SUMMARY"

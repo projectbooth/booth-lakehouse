@@ -25,6 +25,8 @@ RANK = {OWNER: 3, EDITOR: 2, VIEWER: 1}
 
 _GROUP_RE = re.compile(r"^/workspaces/([a-z0-9-]+)/(owner|editor|viewer)$")  # ADR 0025
 WORKSPACE_RE = re.compile(r"^[a-z0-9-]+$")
+# ADR 0058: a workload token's `sub` is `<kind>:<id>`, which no person's `sub` ever matches.
+_WORKLOAD_SUBJECT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}:[A-Za-z0-9._:-]{1,200}$")
 
 # Asymmetric algorithms only: never HS* (algorithm confusion against a public key) and never "none".
 _ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"]
@@ -137,6 +139,10 @@ class Identity:
     workspace: str
     role: str
     token: str  # the caller's own token, forwarded to the broker so its audit names the real requester
+
+    @property
+    def is_person(self) -> bool:
+        return not _WORKLOAD_SUBJECT_RE.match(self.subject)
 
     def require(self, role: str) -> None:
         if RANK[self.role] < RANK[role]:

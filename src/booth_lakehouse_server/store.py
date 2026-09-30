@@ -3,7 +3,9 @@ last been told about each table.
 
 A **binding** records the ``{backendId, path}`` a workspace owner chose (ADR 0045), the Lakekeeper
 warehouse created for it, and the lease/expiry of the broker credential Lakekeeper currently holds
-(so the refresher knows what to renew). It never records a credential value: that lives only in
+(so the refresher knows what to renew). A **member** row is an editor/owner person seen using the
+module, so a renewal can name a current owner when the creator isn't (ADR 0088). It never records a
+credential value: that lives only in
 Lakekeeper's own encrypted secret store (ADR 0084, judgment call 4).
 
 A **published** row is the last ``table.*`` event this module got a JetStream ack for, per table
@@ -80,6 +82,13 @@ class Store:
     def forget_published(self, workspace: str, table_uuid: str) -> None:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def note_member(self, workspace: str, subject: str, role: str, seen_at: float) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def members(self, workspace: str) -> list[str]:  # pragma: no cover - interface
+        """Editors/owners seen in the workspace, most recently seen first."""
+        raise NotImplementedError
+
 
 class Conflict(Exception):
     pass
@@ -89,6 +98,7 @@ class MemoryStore(Store):
     def __init__(self) -> None:
         self._rows: dict[str, Binding] = {}
         self._published: dict[str, dict[str, Published]] = {}
+        self._members: dict[str, dict[str, float]] = {}
         self._lock = threading.Lock()
 
     def get(self, workspace):
@@ -121,6 +131,14 @@ class MemoryStore(Store):
         with self._lock:
             self._published.get(workspace, {}).pop(table_uuid, None)
 
+    def note_member(self, workspace, subject, role, seen_at):
+        with self._lock:
+            self._members.setdefault(workspace, {})[subject] = seen_at
+
+    def members(self, workspace):
+        seen = self._members.get(workspace, {})
+        return sorted(seen, key=seen.get, reverse=True)
+
 
 _SCHEMA = """
 CREATE SCHEMA IF NOT EXISTS booth_lakehouse;
@@ -144,6 +162,13 @@ CREATE TABLE IF NOT EXISTS booth_lakehouse.published_tables (
     digest        text NOT NULL,
     published_at  double precision NOT NULL,
     PRIMARY KEY (workspace, table_uuid)
+);
+CREATE TABLE IF NOT EXISTS booth_lakehouse.members (
+    workspace  text NOT NULL,
+    subject    text NOT NULL,
+    role       text NOT NULL,
+    seen_at    double precision NOT NULL,
+    PRIMARY KEY (workspace, subject)
 );
 """
 
@@ -210,3 +235,16 @@ class PostgresStore(Store):
     def forget_published(self, workspace, table_uuid):
         with self._conn() as c:
             c.execute("DELETE FROM booth_lakehouse.published_tables WHERE workspace = %s AND table_uuid = %s", (workspace, table_uuid))
+
+    def note_member(self, workspace, subject, role, seen_at):
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO booth_lakehouse.members (workspace, subject, role, seen_at) VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (workspace, subject) DO UPDATE SET role = EXCLUDED.role, seen_at = EXCLUDED.seen_at""",
+                (workspace, subject, role, seen_at),
+            )
+
+    def members(self, workspace):
+        with self._conn() as c:
+            rows = c.execute("SELECT subject FROM booth_lakehouse.members WHERE workspace = %s ORDER BY seen_at DESC LIMIT 50", (workspace,)).fetchall()
+        return [r[0] for r in rows]

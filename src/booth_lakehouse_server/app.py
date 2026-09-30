@@ -114,11 +114,13 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
         workspace = request.headers.get("x-booth-workspace") or request.headers.get("x-workspace", "")
         try:
             claims = c.verifier.verify(token)
-            return resolve(claims, token, workspace, request.headers.get("x-booth-role", ""))
+            who = resolve(claims, token, workspace, request.headers.get("x-booth-role", ""))
         except AuthError as e:
             raise HTTPException(401, str(e)) from None
         except Forbidden as e:
             raise HTTPException(403, str(e)) from None
+        c.warehouses.note_member(who)  # candidates for unattended renewal (warehouses.py)
+        return who
 
     @app.get("/health")
     def health():

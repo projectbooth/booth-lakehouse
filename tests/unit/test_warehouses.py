@@ -156,3 +156,119 @@ def test_lakekeeper_unreachable_during_renewal_is_a_failure_not_a_crash():
     now[0] = first.credential_expires_at
     assert [ws for ws, _ in w.renew_due()] == ["acme"]
     assert w.get("acme").lease_id == first.lease_id  # untouched, retried next pass
+
+
+# ---- renewal on behalf of a current owner (ADR 0088) ---------------------------------------------
+
+
+def renew_env(refuse=(), broker_403_for=()):
+    """Warehouses whose minter refuses some owners, and whose broker refuses tokens minted for others."""
+    from booth_lakehouse_server.warehouses import OwnerRefused
+
+    now = [1_000_000.0]
+    lk = FakeLakekeeper()
+    b = FakeBroker()
+    minted: list[str] = []
+
+    def workload(ws, owner):
+        minted.append(owner)
+        if owner in refuse:
+            raise OwnerRefused(f"not current: {owner}", 403)
+        return f"token-for-{owner}"
+
+    def broker_for(tok):
+        if tok().removeprefix("token-for-") in broker_403_for:
+            return FakeBroker(fail=BrokerError("viewer can't readwrite", 403))
+        return b
+
+    w = Warehouses(MemoryStore(), Lakekeeper("http://lk", transport=lk.transport()), broker_for, workload, 3600, 900)
+    w.clock = lambda: now[0]
+    first = w.create(OWNER, "lake", "lakehouse")
+    now[0] = first.credential_expires_at  # due
+    return w, minted, now, first
+
+
+def person(sub, role="editor", ws="acme"):
+    return Identity(sub, ws, role, "t")
+
+
+def test_a_current_member_stands_in_when_the_creator_isnt_current():
+    w, minted, now, first = renew_env(refuse={"alice"})
+    w.note_member(person("bob"))
+    now[0] += 1
+    w.note_member(person("carol", "owner"))  # seen more recently than bob
+    assert w.renew_due() == []
+    assert minted == ["alice", "carol"]  # creator first, then most recently seen
+    assert w.get("acme").lease_id != first.lease_id
+
+
+def test_a_member_whose_live_role_dropped_is_skipped():
+    """Core caps the minted token at the owner's live role; a demoted member gets a viewer token,
+    which the broker refuses for read-write. That's "not this person", so try the next."""
+    w, minted, now, _ = renew_env(refuse={"alice"}, broker_403_for={"bob"})
+    w.note_member(person("dave"))
+    now[0] += 1
+    w.note_member(person("bob"))
+    assert w.renew_due() == []
+    assert minted == ["alice", "bob", "dave"]
+
+
+def test_nobody_current_is_a_failure_and_attempts_are_bounded():
+    from booth_lakehouse_server.warehouses import MAX_RENEWAL_CANDIDATES
+
+    w, minted, now, first = renew_env(refuse={"alice"} | {f"u{i}" for i in range(30)})
+    for i in range(30):
+        now[0] += 1
+        w.note_member(person(f"u{i}"))
+    failures = w.renew_due()
+    assert [ws for ws, _ in failures] == ["acme"] and "no current editor/owner" in failures[0][1]
+    assert len(minted) == MAX_RENEWAL_CANDIDATES
+    assert w.get("acme").lease_id == first.lease_id
+
+
+def test_an_outage_is_not_mistaken_for_a_refusal():
+    """Core unreachable (503) must not burn through every member; it stops and retries next pass."""
+    w, minted, now, _ = renew_env()
+    w.note_member(person("bob"))
+
+    def down(ws, owner):
+        minted.append(owner)
+        raise WarehouseError("core down", 503)
+
+    w.workload_token = down
+    minted.clear()
+    assert [ws for ws, _ in w.renew_due()] == ["acme"]
+    assert minted == ["alice"]
+
+
+def test_only_editors_and_owners_who_are_people_are_recorded_and_writes_are_throttled():
+    w, _, now, _ = renew_env()
+    w.note_member(person("vic", "viewer"))
+    w.note_member(Identity("job:42", "acme", "editor", "t"))  # a pipeline run is never an owner
+    w.note_member(person("bob"))
+    assert w.store.members("acme") == ["bob"]
+    seen = w.store._members["acme"]["bob"]
+    now[0] += 10
+    w.note_member(person("bob"))
+    assert w.store._members["acme"]["bob"] == seen  # within the throttle window: no write
+    now[0] += 600
+    w.note_member(person("bob"))
+    assert w.store._members["acme"]["bob"] > seen
+
+
+def test_core_refusing_the_owner_is_an_owner_refusal():
+    import io
+    import urllib.error
+
+    from booth_lakehouse_server.warehouses import OwnerRefused, WorkloadTokens
+
+    def opener(status):
+        def _open(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, status, "x", {}, io.BytesIO(b"{}"))
+        return _open
+
+    with pytest.raises(OwnerRefused):
+        WorkloadTokens("http://core/api/internal/workload-tokens", "cred", opener(403))("acme", "alice")
+    with pytest.raises(WarehouseError) as e:
+        WorkloadTokens("http://core/api/internal/workload-tokens", "cred", opener(503))("acme", "alice")
+    assert not isinstance(e.value, OwnerRefused)

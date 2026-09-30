@@ -62,6 +62,7 @@ def env():
     reader = TableReader("http://lk", transport=httpx.MockTransport(cat.answer))
     app = create_app(Components(verifier(idp), store, lakekeeper, wh, reader), run_renewals=False, catalog_transport=httpx.MockTransport(cat.handle))
     client = TestClient(app)
+    client.store = store  # for assertions on what the app recorded
     owner = {"Authorization": "Bearer " + idp.token(sub="alice", groups=["/workspaces/acme/owner"]), "X-Workspace": "acme"}
     r = client.put("/api/warehouse", json={"backendId": "lake", "path": "lakehouse"}, headers=owner)
     assert r.status_code == 201, r.text
@@ -139,3 +140,12 @@ def test_only_owner_creates_and_only_once(env):
     client, *_ = env
     assert client.put("/api/warehouse", json={"backendId": "lake", "path": "x"}, headers=h("editor")).status_code == 403
     assert client.put("/api/warehouse", json={"backendId": "lake", "path": "x"}, headers=h("owner")).status_code == 409
+
+
+def test_verified_editors_and_owners_become_renewal_candidates(env):
+    client, *_ = env
+    for sub, role in (("bob", "editor"), ("vic", "viewer"), ("job:7", "editor")):
+        h = {"Authorization": "Bearer " + idp.token(sub=sub, groups=[f"/workspaces/acme/{role}"]), "X-Workspace": "acme"}
+        assert client.get("/api/warehouse", headers=h).status_code == 200
+    # alice created the warehouse (an owner request), bob is an editor; viewers and runs aren't recorded.
+    assert sorted(client.store.members("acme")) == ["alice", "bob"]

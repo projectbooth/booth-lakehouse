@@ -10,9 +10,16 @@ Creating one (owner only):
 
 Renewing: before the current grant expires, ask the broker for a fresh one and hand it to Lakekeeper's
 ``storage-credential`` endpoint (which exists for exactly this). No person is present then, so the
-request is made with a workload token core mints for this module on the workspace's behalf (ADR 0056)
-— with ``owner`` = whoever created the warehouse. That has a real limit, flagged in
-docs/decisions/0001: core refuses to mint once that owner hasn't signed in for its recency window.
+request is made with a workload token core mints for this module on the workspace's behalf (ADR 0056).
+Core requires the token's ``owner`` to be a person it has seen recently (default 7 days) and caps the
+token at that person's live role. So owners are tried in order (ADR 0088's ruling):
+
+  1. whoever created the warehouse;
+  2. then the workspace's other editors/owners this module has seen, most recently seen first
+     (recorded from the tokens it already verifies: people only, never a workload token).
+
+A refusal that means "not this person" (core won't mint for them, or their live role is too low for
+a read-write grant) moves on to the next; anything else stops the attempt until the next pass.
 """
 
 from __future__ import annotations
@@ -51,6 +58,18 @@ def normalize_path(path: str) -> str:
     return "/".join(parts)
 
 
+class OwnerRefused(WarehouseError):
+    """Core wouldn't mint for this owner (not seen recently, or no longer entitled: ADR 0058 makes the
+    two indistinguishable on purpose). Another owner may still work."""
+
+
+# At most this many people are tried per renewal, so a workspace whose module lost its entitlement
+# (every mint 403s) costs a bounded number of calls per pass, not one per member.
+MAX_RENEWAL_CANDIDATES = 10
+# How often one person's "seen" time is written back (a request stream isn't a write stream).
+MEMBER_NOTE_INTERVAL_SECONDS = 300
+
+
 class WorkloadTokens:
     """Core's workload-token minting (ADR 0056/0058, core-platform-api.md "Workload identity")."""
 
@@ -68,6 +87,8 @@ class WorkloadTokens:
             with self._open(req, timeout=30) as resp:
                 return json.loads(resp.read())["token"]
         except urllib.error.HTTPError as e:
+            if e.code == 403:
+                raise OwnerRefused(f"core won't mint a workload token on behalf of {owner!r} in {workspace!r}", 403) from None
             raise WarehouseError(f"core refused a workload token for renewing workspace {workspace!r}'s warehouse credential (HTTP {e.code})", 503) from None
         except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
             raise WarehouseError(f"couldn't mint a workload token: {e}", 503) from None
@@ -85,8 +106,24 @@ class Warehouses:
     renew_margin_seconds: int = 900
     clock: Callable[[], float] = time.time
 
+    def __post_init__(self) -> None:
+        self._noted: dict[tuple[str, str, str], float] = {}
+
     def get(self, workspace: str) -> Binding | None:
         return self.store.get(workspace)
+
+    def note_member(self, who: Identity) -> None:
+        """Remember a person who can stand behind a renewal (editor/owner). Throttled per person."""
+        if not who.is_person or who.role not in ("owner", "editor"):
+            return
+        key, now = (who.workspace, who.subject, who.role), self.clock()
+        if now - self._noted.get(key, float("-inf")) < MEMBER_NOTE_INTERVAL_SECONDS:
+            return
+        self._noted[key] = now
+        try:
+            self.store.note_member(who.workspace, who.subject, who.role, now)
+        except Exception as e:  # noqa: BLE001 - bookkeeping must never fail a request
+            log.warning("couldn't record member workspace=%s: %s", who.workspace, e)
 
     def _grant(self, token: Callable[[], str], workspace: str, backend_id: str, path: str) -> S3Grant:
         if self.broker_for is None:
@@ -150,8 +187,22 @@ class Warehouses:
     def renew(self, b: Binding) -> None:
         if self.workload_token is None:
             raise WarehouseError("renewing needs workload identity (workloadIdentity.enabled), which isn't configured", 503)
-        token = self.workload_token(b.workspace, b.created_by)
-        grant = self._grant(lambda: token, b.workspace, b.backend_id, b.path)
+        candidates = ([b.created_by] + [m for m in self.store.members(b.workspace) if m != b.created_by])[:MAX_RENEWAL_CANDIDATES]
+        grant = None
+        for owner in candidates:
+            try:
+                token = self.workload_token(b.workspace, owner)
+                grant = self._grant(lambda token=token: token, b.workspace, b.backend_id, b.path)
+            except WarehouseError as e:
+                if isinstance(e, OwnerRefused) or e.status == 403:
+                    log.info("renewal for workspace=%s: can't renew on behalf of %s (%s); trying the next owner", b.workspace, owner, e)
+                    continue
+                raise
+            if owner != b.created_by:
+                log.info("renewal for workspace=%s made on behalf of %s (the creator isn't current)", b.workspace, owner)
+            break
+        if grant is None:
+            raise WarehouseError(f"no current editor/owner of workspace {b.workspace!r} could stand behind a renewal ({len(candidates)} tried)", 503)
         if grant.root_uri != b.storage_root:
             raise WarehouseError(f"the broker's renewed credential covers {grant.root_uri}, not this warehouse's {b.storage_root}; not using it", 502)
         self.lakekeeper.update_credential(b.warehouse_id, grant)

@@ -67,6 +67,11 @@ engine (notebook kernel, pipeline task) ──Bearer, X-Workspace──▶ booth
    `owner` = the warehouse's creator (ADR 0056/0058). **Real limit:** core refuses to mint once that
    owner hasn't signed in within its recency window (default 7 days), after which renewal fails and
    the warehouse goes dark when the credential expires. See ask (d) below.
+   **Update (2026-09-29, ADR 0088):** ruled "no non-person identity; name a current owner instead".
+   Built: renewal tries the creator, then up to 9 other editors/owners this module has seen
+   (people only, most recently seen first, from the tokens it already verifies), moving on only when
+   core refuses the mint (403) or the broker refuses the resulting token's live role (403). The
+   warehouse now goes dark only if *no* editor/owner has used it within core's recency window.
 
 6. **One warehouse per workspace, not movable in v0** (a second `PUT` is 409). Moving a warehouse is
    a data migration. Lakekeeper itself refuses overlapping warehouse locations, so two workspaces can

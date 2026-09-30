@@ -49,11 +49,11 @@ jobs:
             hack/minio-test
       - name: Refuse unless it actually serves
         run: |
-          docker run -d --name m -e MINIO_ROOT_USER=probe -e MINIO_ROOT_PASSWORD=probe-secret minio-test:candidate
-          for i in $(seq 1 30); do docker exec m mc ready local >/dev/null 2>&1 && break; sleep 1; done
-          docker exec m mc ready local
-          docker exec m sh -c 'mc alias set p http://127.0.0.1:9000 probe probe-secret >/dev/null && mc mb p/probe && mc ls p'
-          docker rm -f m
+          docker run -d --name minio-probe -e MINIO_ROOT_USER=probe -e MINIO_ROOT_PASSWORD=probe-secret minio-test:candidate
+          for i in $(seq 1 30); do docker exec minio-probe mc ready local >/dev/null 2>&1 && break; sleep 1; done
+          docker exec minio-probe mc ready local
+          docker exec minio-probe sh -c 'mc alias set p http://127.0.0.1:9000 probe probe-secret >/dev/null && mc mb p/probe && mc ls p'
+          docker rm -f minio-probe
       - name: Push
         run: |
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin

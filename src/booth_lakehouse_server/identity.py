@@ -24,6 +24,8 @@ OWNER, EDITOR, VIEWER = "owner", "editor", "viewer"
 RANK = {OWNER: 3, EDITOR: 2, VIEWER: 1}
 
 _GROUP_RE = re.compile(r"^/workspaces/([a-z0-9-]+)/(owner|editor|viewer)$")  # ADR 0025
+# ADR 0094: a platform operator — a property of the person, not of any workspace. Exact match only.
+PLATFORM_OPERATOR_GROUP = "/platform/operator"
 WORKSPACE_RE = re.compile(r"^[a-z0-9-]+$")
 # ADR 0058: a workload token's `sub` is `<kind>:<id>`, which no person's `sub` ever matches.
 _WORKLOAD_SUBJECT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}:[A-Za-z0-9._:-]{1,200}$")
@@ -139,6 +141,8 @@ class Identity:
     workspace: str
     role: str
     token: str  # the caller's own token, forwarded to the broker so its audit names the real requester
+    # ADR 0094: read from the verified token's own groups claim, never from a header.
+    is_operator: bool = False
 
     @property
     def is_person(self) -> bool:
@@ -149,7 +153,7 @@ class Identity:
             raise Forbidden(f"this needs the {role} role in workspace {self.workspace!r}; you have {self.role}")
 
     def __repr__(self) -> str:  # never print the token
-        return f"Identity(subject={self.subject!r}, workspace={self.workspace!r}, role={self.role!r})"
+        return f"Identity(subject={self.subject!r}, workspace={self.workspace!r}, role={self.role!r}, operator={self.is_operator})"
 
 
 def resolve(claims: Claims, token: str, workspace: str, forwarded_role: str = "") -> Identity:
@@ -165,4 +169,4 @@ def resolve(claims: Claims, token: str, workspace: str, forwarded_role: str = ""
     if forwarded and RANK.get(forwarded, 99) > RANK[granted]:
         raise Forbidden("the forwarded role exceeds what your token grants in this workspace")
     role = forwarded if forwarded in RANK and RANK[forwarded] < RANK[granted] else granted
-    return Identity(claims.subject, workspace, role, token)
+    return Identity(claims.subject, workspace, role, token, PLATFORM_OPERATOR_GROUP in claims.groups)

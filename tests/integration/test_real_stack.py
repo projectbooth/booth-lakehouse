@@ -285,12 +285,13 @@ def test_admin_view_reports_real_lakekeeper_table_counts(acme, tokens):
     assert http("GET", f"{GW}/api/admin/warehouses", headers=_h(tokens["viewer"]))[0] == 403
 
 
-def test_admin_view_operator_sees_every_workspace(acme, tokens):
-    ops_owner = token(OWNER_SUB, "/workspaces/ops/owner")
-    status, doc = http("GET", f"{GW}/api/admin/warehouses", headers=_h(ops_owner, "ops"))
+def test_admin_view_platform_operator_sees_every_workspace(acme, tokens):
+    """ADR 0094: the `/platform/operator` claim, even for someone who is only a viewer where they act."""
+    operator = token("olivia-operator", "/workspaces/acme/viewer", "/platform/operator")
+    status, doc = http("GET", f"{GW}/api/admin/warehouses", headers=_h(operator))
     assert status == 200 and doc["scope"] == "all"
     assert {"acme", "beta"} <= {i["workspace"] for i in doc["items"]}
-    # beta's editor, not in an operator workspace, sees only beta.
+    # beta's editor, not an operator, sees only beta.
     status, doc = http("GET", f"{GW}/api/admin/warehouses", headers=_h(tokens["beta_editor"], "beta"))
     assert [i["workspace"] for i in doc["items"]] == ["beta"]
 

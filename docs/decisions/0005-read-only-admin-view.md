@@ -39,5 +39,14 @@ dependency), so it inherits the same tested enforcement; its own tests use real 
    ADR 0067 said a real operator role should wait for "a second module" needing the distinction —
    this is that second consumer (and booth-database's identical view will likely be the third), so
    it's worth the coordinator deciding whether it's time for that ADR.
+
+   **Update (2026-09-30, ADR 0094): ruled — a real role.** A platform operator is now whoever has
+   `/platform/operator` in their verified token's groups claim (exact match), and `access.operatorWorkspaces`
+   is gone. The scoping above is unchanged (own workspace for editors/owners, everything for an operator,
+   fail-closed when nobody holds the claim). One consequence of "operator status is orthogonal to
+   workspace role": an operator gets the all-workspaces view whatever their role where they're acting,
+   including viewer; the old allowlist required *owner* only because that was part of how an operator was
+   identified. An operator still needs a verified membership in the workspace they're acting in, as every
+   route does — the claim widens what they see, not whether they're authenticated.
 3. **Creator names** are resolved through core's user directory (best-effort, own workspace only,
    ADR 0052), falling back to the raw `sub`.

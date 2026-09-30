@@ -33,8 +33,8 @@ booth-storage: `lh.create_warehouse("lake", "lakehouse")` (a `{backendId, path}`
 
 A single read-only native view under **Manage** (`/lakehouse`, ADR 0093), from
 `@projectbooth/lakehouse-ui` (`web/`): each warehouse's location, creator, storage-credential state and
-table count. Editors/owners see their own workspace; owners acting in a workspace listed in
-`access.operatorWorkspaces` see every workspace. No create/delete actions.
+table count. Editors/owners see their own workspace; a platform operator (`/platform/operator` in their
+token's groups claim, ADR 0094) sees every workspace. No create/delete actions.
 
 ```sh
 cd web && npm ci && npm run dev      # dev harness against BOOTH_LAKEHOUSE_DEV_BACKEND (default :8080)
@@ -82,7 +82,7 @@ helm install lakehouse charts/booth-lakehouse -n booth-lakehouse \
 ```
 
 Key values: `identity.*` (trusted issuers), `broker.url` (default `<core.url>/api/credentials`),
-`workloadIdentity.enabled`, `tableEvents.*`, `access.operatorWorkspaces` (admin view), `warehouseCredential.*`, `core.namespaceSelector`/`podSelector`
+`workloadIdentity.enabled`, `tableEvents.*`, `warehouseCredential.*`, `core.namespaceSelector`/`podSelector`
 (must match your core install; they gate the API's ingress). **The NetworkPolicies need a CNI that
 enforces them** — Lakekeeper has no authentication of its own, so "only the API pod reaches it" is a
 real security boundary, not decoration.

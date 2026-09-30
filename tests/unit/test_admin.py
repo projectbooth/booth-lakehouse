@@ -27,20 +27,20 @@ def binding(ws: str, expires: float = 10**10) -> Binding:
 # ---- pure decisions ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("role,ws,ops,scope", [
-    ("owner", "acme", frozenset(), admin.OWN),
-    ("editor", "acme", frozenset(), admin.OWN),
-    ("owner", "ops", frozenset({"ops"}), admin.ALL),
-    ("editor", "ops", frozenset({"ops"}), admin.OWN),   # operator scope is owners only
-    ("owner", "acme", frozenset({"ops"}), admin.OWN),   # an owner elsewhere is not an operator
+@pytest.mark.parametrize("role,operator,scope", [
+    ("owner", False, admin.OWN),
+    ("editor", False, admin.OWN),
+    ("owner", True, admin.ALL),
+    ("editor", True, admin.ALL),
+    ("viewer", True, admin.ALL),  # ADR 0094: operator status is orthogonal to the workspace role
 ])
-def test_scope(role, ws, ops, scope):
-    assert admin.decide(Identity("u", ws, role, "t"), ops).scope == scope
+def test_scope(role, operator, scope):
+    assert admin.decide(Identity("u", "acme", role, "t", operator)).scope == scope
 
 
-def test_viewers_are_refused():
+def test_non_operator_viewers_are_refused():
     with pytest.raises(Forbidden):
-        admin.decide(Identity("u", "ops", "viewer", "t"), frozenset({"ops"}))
+        admin.decide(Identity("u", "acme", "viewer", "t", False))
 
 
 def test_credential_status():
@@ -101,14 +101,15 @@ def client():
     for ws in ("acme", "beta", "ops"):
         store.insert(binding(ws))
     wh = Warehouses(store, lakekeeper, lambda tok: FakeBroker(), None, 300, 120)
-    comps = Components(verifier(idp), store, lakekeeper, wh, TableReader("http://lk", transport=httpx.MockTransport(handler)), operator_workspaces=frozenset({"ops"}))
+    comps = Components(verifier(idp), store, lakekeeper, wh, TableReader("http://lk", transport=httpx.MockTransport(handler)))
     c = TestClient(create_app(comps, run_renewals=False))
     c.stats_calls = stats_calls
     return c
 
 
-def get(c, role, ws, sub="u1", **headers):
-    h = {"Authorization": "Bearer " + idp.token(sub=sub, groups=[f"/workspaces/{ws}/{role}"]), "X-Workspace": ws, **headers}
+def get(c, role, ws, sub="u1", extra_groups=(), **headers):
+    groups = [f"/workspaces/{ws}/{role}", *extra_groups]
+    h = {"Authorization": "Bearer " + idp.token(sub=sub, groups=groups), "X-Workspace": ws, **headers}
     return c.get("/api/admin/warehouses", headers=h)
 
 
@@ -123,8 +124,8 @@ def test_an_editor_sees_only_their_own_workspace(client):
     assert "secret" not in r.text.lower() and "lease" not in r.text.lower()
 
 
-def test_an_operator_owner_sees_every_workspace_and_a_failing_stat_is_null_not_an_error(client):
-    doc = get(client, "owner", "ops").json()
+def test_a_platform_operator_sees_every_workspace_and_a_failing_stat_is_null_not_an_error(client):
+    doc = get(client, "viewer", "acme", extra_groups=["/platform/operator"]).json()
     assert doc["scope"] == "all"
     by_ws = {i["workspace"]: i for i in doc["items"]}
     assert set(by_ws) == {"acme", "beta", "ops"}
@@ -135,11 +136,26 @@ def test_an_operator_owner_sees_every_workspace_and_a_failing_stat_is_null_not_a
 def test_refusals(client):
     assert get(client, "viewer", "acme").status_code == 403
     assert client.get("/api/admin/warehouses", headers={"X-Workspace": "acme"}).status_code == 401
-    # ADR 0041: an operator-workspace *editor* forging owner doesn't get the all-workspaces view.
-    assert get(client, "editor", "ops", **{"X-Booth-Role": "owner"}).status_code == 403
+    # ADR 0041: a forged stronger role header is refused outright.
+    assert get(client, "editor", "acme", **{"X-Booth-Role": "owner"}).status_code == 403
     # A token for another workspace can't select this one.
     h = {"Authorization": "Bearer " + idp.token(groups=["/workspaces/beta/owner"]), "X-Workspace": "acme"}
     assert client.get("/api/admin/warehouses", headers=h).status_code == 403
+
+
+@pytest.mark.parametrize("lookalike", ["/platform/operator/x", "platform/operator", "/platform/Operator", "/workspaces/platform/operator", "/platform/operators"])
+def test_only_the_exact_claim_makes_an_operator(client, lookalike):
+    doc = get(client, "owner", "acme", extra_groups=[lookalike]).json()
+    assert doc["scope"] == "workspace" and [i["workspace"] for i in doc["items"]] == ["acme"]
+
+
+def test_no_header_can_make_an_operator(client):
+    """ADR 0094: operator status comes only from the verified token's own groups claim."""
+    headers = {"X-Booth-Operator": "true", "X-Booth-Groups": "/platform/operator"}
+    doc = get(client, "owner", "acme", **headers).json()
+    assert doc["scope"] == "workspace"
+    # And "operator" as a forwarded role is refused outright: stronger than the token grants (ADR 0041).
+    assert get(client, "owner", "acme", **{"X-Booth-Role": "operator"}).status_code == 403
 
 
 def test_a_workspace_without_a_warehouse_is_an_empty_list(client):

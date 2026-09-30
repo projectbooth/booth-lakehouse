@@ -99,12 +99,12 @@ def test_one_native_manage_view_and_no_admin_split(spec):
     assert "adminNavPath" not in spec
 
 
-def test_operator_workspaces_default_to_none(api):
-    """Fail closed: nobody sees another tenant's warehouse unless an operator names workspaces."""
-    assert env_of(pod(api)["containers"][0])["BOOTH_LAKEHOUSE_OPERATOR_WORKSPACES"]["value"] == ""
-    docs = render("--set", "access.operatorWorkspaces={ops,platform}")
-    api2 = one(docs, "Deployment", f"{FULL}-api")
-    assert env_of(pod(api2)["containers"][0])["BOOTH_LAKEHOUSE_OPERATOR_WORKSPACES"]["value"] == "ops,platform"
+def test_no_operator_allowlist_remains(chart):
+    """ADR 0094: operators are identified by the `/platform/operator` token claim, so the ADR 0067-style
+    chart allowlist is gone — nothing in the chart configures who is an operator."""
+    text = yaml.safe_dump_all(chart)
+    assert "OPERATOR_WORKSPACES" not in text and "operatorWorkspaces" not in text
+    assert "operatorWorkspaces" not in (CHART / "values.yaml").read_text()
 
 
 def test_declares_database_workload_identity_and_exactly_the_table_events(spec):

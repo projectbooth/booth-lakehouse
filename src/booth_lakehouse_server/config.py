@@ -27,9 +27,6 @@ class Settings:
     events_creds_file: str = ""
     events_interval_seconds: float = 10
     events_update_min_gap_seconds: float = 60
-    # ADR 0093 admin view: owners acting in these workspaces see every workspace's warehouse (the
-    # ADR 0067 stopgap for a missing operator role). Empty = nobody sees another tenant's.
-    operator_workspaces: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls, env=None) -> Settings:
@@ -58,5 +55,4 @@ class Settings:
             events_creds_file=env.get("BOOTH_EVENTS_CREDS_FILE", ""),
             events_interval_seconds=float(env.get("TABLE_EVENTS_INTERVAL_SECONDS", "10")),
             events_update_min_gap_seconds=float(env.get("TABLE_EVENTS_UPDATE_MIN_GAP_SECONDS", "60")),
-            operator_workspaces=frozenset(w.strip() for w in env.get("BOOTH_LAKEHOUSE_OPERATOR_WORKSPACES", "").split(",") if w.strip()),
         )

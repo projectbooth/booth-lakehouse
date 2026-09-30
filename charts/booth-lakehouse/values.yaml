@@ -48,11 +48,6 @@ tableEvents:
   intervalSeconds: 10          # how often every warehouse is compared with what was last published
   updateMinGapSeconds: 60      # at most one table.updated per table per this many seconds
 
-access:
-  # ADR 0093's admin view: owners acting in one of these workspaces see EVERY workspace's warehouse
-  # (ADR 0067's operator stopgap, reused). Empty (default) = each editor/owner sees only their own.
-  operatorWorkspaces: []
-
 warehouseCredential:
   # ADR 0088: the broker caps a request at 300 s (clamped, not refused); a provider may grant longer
   # (MinIO's floor is 15 min). Keep the margin well under the shortest grant, or every pass renews.

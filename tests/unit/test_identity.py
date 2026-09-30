@@ -45,6 +45,17 @@ def test_group_grammar_is_strict_and_highest_role_wins():
     assert role_in_workspace(["/workspaces/acme/admin", "workspaces/acme/owner", "/workspaces/acme-x/owner"], "acme") == ""
 
 
+def test_platform_operator_comes_from_the_tokens_own_groups_claim():
+    """ADR 0094: an exact `/platform/operator` group, orthogonal to the workspace role."""
+    op = resolve(v.verify(idp.token(groups=["/workspaces/acme/viewer", "/platform/operator"])), "t", "acme")
+    assert op.is_operator and op.role == "viewer"
+    for groups in (["/workspaces/acme/owner"], ["/workspaces/acme/owner", "/platform/operator/"], ["/workspaces/acme/owner", "/platform"]):
+        assert not resolve(v.verify(idp.token(groups=groups)), "t", "acme").is_operator
+    # Being an operator doesn't grant membership of a workspace the token has no role in.
+    with pytest.raises(Forbidden, match="no role"):
+        resolve(v.verify(idp.token(groups=["/platform/operator"])), "t", "acme")
+
+
 def test_identity_repr_never_contains_the_token():
     who = resolve(v.verify(idp.token()), "SECRET-TOKEN", "acme")
     assert "SECRET-TOKEN" not in repr(who)

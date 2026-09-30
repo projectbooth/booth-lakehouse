@@ -123,8 +123,6 @@ services:
       BOOTH_EVENTS_CREDS_FILE: /natsauth/lakehouse.creds
       TABLE_EVENTS_INTERVAL_SECONDS: "2"
       TABLE_EVENTS_UPDATE_MIN_GAP_SECONDS: "5"
-      # ADR 0093 admin view: owners acting in "ops" see every workspace's warehouse (ADR 0067 stopgap).
-      BOOTH_LAKEHOUSE_OPERATOR_WORKSPACES: ops
     volumes: ["../tests/integration/natsauth/lakehouse.creds:/natsauth/lakehouse.creds:ro"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]

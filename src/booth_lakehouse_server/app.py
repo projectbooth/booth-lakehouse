@@ -5,8 +5,8 @@
 - ``PUT  /api/warehouse``              — owner: create it at ``{backendId, path}`` (ADR 0045).
 - ``GET  /api/tables``                 — every table in this workspace's warehouse.
 - ``GET  /api/admin/warehouses``       — the admin view (ADR 0093): warehouses with cheap status,
-                                         own workspace for editors/owners, every workspace for an
-                                         owner in an operator workspace (admin.py). Read-only.
+                                         own workspace for editors/owners, every workspace for a
+                                         platform operator (ADR 0094, admin.py). Read-only.
 - ``GET  /api/tables/{ns}/{table}``    — one table: schema, location as ``{backendId, path}``,
                                          snapshots. Minus snapshots, the ``table.*`` event payload
                                          booth-catalog registers (ADR 0085, events.py).
@@ -58,7 +58,6 @@ class Components:
     renew_interval_seconds: int = 60
     events: TableEvents | None = None
     events_interval_seconds: float = 10
-    operator_workspaces: frozenset[str] = frozenset()
 
 
 def components_from_settings(s: Settings) -> Components:
@@ -79,9 +78,7 @@ def components_from_settings(s: Settings) -> Components:
         events = TableEvents(store, reader, NatsPublisher(s.events_url, s.events_creds_file), s.events_update_min_gap_seconds)
     else:
         log.warning("BOOTH_EVENTS_URL is empty: no table.* events, so booth-catalog won't learn about tables (ADR 0085)")
-    if not s.operator_workspaces:
-        log.info("admin view: no operator workspaces configured, so each caller sees only their own workspace's warehouse")
-    return Components(Verifier(s.issuers, s.groups_claim), store, lk, wh, reader, s.renew_interval_seconds, events, s.events_interval_seconds, s.operator_workspaces)
+    return Components(Verifier(s.issuers, s.groups_claim), store, lk, wh, reader, s.renew_interval_seconds, events, s.events_interval_seconds)
 
 
 class WarehouseRequest(BaseModel):
@@ -161,7 +158,7 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
     @app.get("/api/admin/warehouses")
     async def admin_warehouses(who: Identity = Depends(identity)):
         try:
-            access = admin.decide(who, c.operator_workspaces)
+            access = admin.decide(who)
         except Forbidden as e:
             raise HTTPException(403, str(e)) from None
         if access.scope == admin.ALL:

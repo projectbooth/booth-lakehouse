@@ -1,13 +1,13 @@
 """The read-only admin view's data (ADR 0093): which workspaces have a warehouse, and its cheap status.
 
-**Who sees what.** The platform has only per-workspace roles (ADR 0025), no operator role, so:
+**Who sees what** (ADR 0093 scoping, ADR 0094 identification):
 
-- by default a caller sees **their own active workspace's** warehouse, if they're its owner or editor
+- a **platform operator** — ``/platform/operator`` in the caller's own verified groups claim — sees
+  every workspace's warehouse, whatever their role in the workspace they're acting in (operator status
+  is orthogonal to workspace roles, ADR 0094);
+- otherwise a caller sees **their own active workspace's** warehouse, if they're its owner or editor
   (viewers already see the bare binding via ``GET /api/warehouse``; this is a Manage view);
-- an **owner acting in an operator workspace** — one named in ``access.operatorWorkspaces``
-  (``BOOTH_LAKEHOUSE_OPERATOR_WORKSPACES``) — sees every workspace's warehouse. This is booth-logging's
-  ADR 0067 ``access.workspaces`` stopgap, reused exactly rather than inventing a second mechanism, but
-  **fail-closed**: unset means nobody sees another tenant's warehouse (docs/decisions/0005).
+- **fail-closed**: with nobody holding the claim, nobody sees another tenant's warehouse.
 
 **Cheap status only**, per ADR 0093: everything comes from this module's own store except the table
 count, which is one call to Lakekeeper's per-warehouse statistics (maintained by Lakekeeper on every
@@ -34,8 +34,8 @@ class Access:
     scope: str  # ALL or OWN
 
 
-def decide(who: Identity, operator_workspaces: frozenset[str]) -> Access:
-    if who.role == OWNER and who.workspace in operator_workspaces:
+def decide(who: Identity) -> Access:
+    if who.is_operator:
         return Access(ALL)
     if who.role in (OWNER, EDITOR):
         return Access(OWN)

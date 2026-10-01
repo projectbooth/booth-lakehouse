@@ -10,8 +10,9 @@ export type WorkspaceRole = "owner" | "editor" | "viewer";
 export interface LakehouseAppProps {
   /** Active workspace slug (ADR 0025). */
   workspace: string;
-  /** Gates what this UI offers. The API enforces the same rule itself (ADR 0041) — this is UX, not
-   *  the security boundary. */
+  /** Part of the mount contract, but deliberately NOT used to decide whether to load: who may see
+   *  the view isn't a function of workspace role alone — a platform operator (ADR 0094) may be a
+   *  viewer here. The API decides (it re-verifies the token, ADR 0041); a 403 means "not for you". */
   role: WorkspaceRole;
   theme: "dark" | "light";
   /** booth-design's current bearer token (ADR 0032), or null. Called fresh before every request. */
@@ -25,9 +26,8 @@ type State = { kind: "loading" } | { kind: "ready"; view: AdminView } | { kind: 
  * of warehouses and their cheap status. Deliberately no create/delete/drop action — creating a
  * warehouse stays in the client library, and deleting one is undecided (a future ADR).
  */
-export function LakehouseApp({ workspace, role, theme, getAccessToken }: LakehouseAppProps) {
+export function LakehouseApp({ workspace, theme, getAccessToken }: LakehouseAppProps) {
   const ctx = useMemo<ApiContext>(() => ({ workspace, getAccessToken }), [workspace, getAccessToken]);
-  const allowed = role === "owner" || role === "editor";
   const [state, setState] = useState<State>({ kind: "loading" });
   const [names, setNames] = useState<Record<string, string>>({});
 
@@ -43,7 +43,9 @@ export function LakehouseApp({ workspace, role, theme, getAccessToken }: Lakehou
     };
   }, [ctx]);
 
-  useEffect(() => (allowed ? load() : undefined), [allowed, load]);
+  // Always ask: the server answers "workspace", "all" (an operator, whatever their role here), or 403.
+  useEffect(() => load(), [load]);
+  const forbidden = state.kind === "error" && state.status === 403;
 
   // Best-effort display names for creators in the caller's own workspace (the directory is
   // workspace-scoped, ADR 0052); anything else keeps showing the raw subject.
@@ -71,7 +73,7 @@ export function LakehouseApp({ workspace, role, theme, getAccessToken }: Lakehou
               : `Workspace ${workspace}. Read-only.`}
           </p>
         </div>
-        {allowed && (
+        {!forbidden && (
           <button
             type="button"
             onClick={() => load()}
@@ -83,8 +85,8 @@ export function LakehouseApp({ workspace, role, theme, getAccessToken }: Lakehou
         )}
       </header>
 
-      {!allowed ? (
-        <Notice>The lakehouse admin view is available to a workspace&apos;s editors and owners.</Notice>
+      {forbidden ? (
+        <Notice>The lakehouse admin view is available to a workspace&apos;s editors and owners, and to platform operators.</Notice>
       ) : state.kind === "loading" ? (
         <p className="text-sm text-slate-500" role="status">
           Loading…

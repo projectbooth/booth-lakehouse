@@ -74,22 +74,37 @@ describe("LakehouseApp", () => {
     expect(screen.queryByRole("button", { name: /create|delete|drop/i })).not.toBeInTheDocument();
   });
 
-  it("doesn't call the API for a viewer", async () => {
-    const calls = mockFetch({});
+  it("asks the server even for a viewer, and shows a 403 as the not-available notice", async () => {
+    const calls = mockFetch({
+      "/modules/lakehouse/api/admin/warehouses": json({ detail: "the lakehouse admin view needs the editor or owner role in this workspace" }, 403),
+    });
     render(<LakehouseApp {...props} role="viewer" />);
-    expect(screen.getByText(/available to a workspace's editors and owners/)).toBeInTheDocument();
-    expect(calls).toHaveLength(0);
+    expect(await screen.findByText(/available to a workspace's editors and owners, and to platform operators/)).toBeInTheDocument();
+    expect(calls.filter((c) => c.url.startsWith("/modules/lakehouse"))).toHaveLength(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument(); // not an error, just not for this person
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+  });
+
+  it("shows the operator view to a platform operator who is only a viewer here (ADR 0094)", async () => {
+    mockFetch({
+      "/modules/lakehouse/api/admin/warehouses": json({ scope: "all", items: [row("acme"), row("beta")] }),
+      "/api/users/": json({}, 404),
+    });
+    render(<LakehouseApp {...props} role="viewer" />);
+    expect(await screen.findByText(/Every workspace \(operator view\)/)).toBeInTheDocument();
+    expect(screen.getAllByRole("row")).toHaveLength(3); // header + two workspaces
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
   });
 
   it("reports errors and refreshes on demand", async () => {
     let fail = true;
     mockFetch({
       "/modules/lakehouse/api/admin/warehouses": () =>
-        fail ? json({ detail: "the lakehouse admin view needs the editor or owner role" }, 403)() : json({ scope: "workspace", items: [row("acme")] })(),
+        fail ? json({ detail: "Lakekeeper returned 500" }, 500)() : json({ scope: "workspace", items: [row("acme")] })(),
       "/api/users/": json({}, 404),
     });
     render(<LakehouseApp {...props} />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("needs the editor or owner role");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Lakekeeper returned 500");
     fail = false;
     await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(screen.getByText("lake:lakehouse")).toBeInTheDocument());

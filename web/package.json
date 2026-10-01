@@ -1,6 +1,6 @@
 {
   "name": "@projectbooth/lakehouse-ui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Native-mode Lakehouse UI (ADR 0030, ADR 0093): a read-only admin view of which workspaces have a warehouse and its status, as a component booth-design mounts via its native-module registry.",
   "license": "UNLICENSED",

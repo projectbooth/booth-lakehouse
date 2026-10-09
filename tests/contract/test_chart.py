@@ -239,3 +239,11 @@ def test_every_pod_carries_the_module_label(api, lakekeeper):
     for d in (api, lakekeeper):
         assert d["spec"]["template"]["metadata"]["labels"]["booth.projectbooth.io/module"] == "lakehouse"
         assert "booth.projectbooth.io/workspace" not in d["spec"]["template"]["metadata"]["labels"]  # shared pods (ADR 0077)
+
+
+def test_oidc_jwks_url_passes_through_and_defaults_to_empty(api):
+    """ADR 0108: identity.oidcJwksUrl -> BOOTH_OIDC_JWKS_URL; empty (the default) = ordinary discovery."""
+    assert env_of(pod(api)["containers"][0])["BOOTH_OIDC_JWKS_URL"]["value"] == ""
+    url = "http://keycloak.booth-system.svc:8080/realms/booth/protocol/openid-connect/certs"
+    docs = render("--set", f"identity.oidcJwksUrl={url}")
+    assert env_of(pod(one(docs, "Deployment", f"{FULL}-api"))["containers"][0])["BOOTH_OIDC_JWKS_URL"]["value"] == url

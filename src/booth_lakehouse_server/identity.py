@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import httpx
 import jwt
-from jwt import PyJWKClient
+from jwt import PyJWK, PyJWKError
 
 OWNER, EDITOR, VIEWER = "owner", "editor", "viewer"
 RANK = {OWNER: 3, EDITOR: 2, VIEWER: 1}
@@ -46,6 +46,13 @@ class Forbidden(Exception):
 class TrustedIssuer:
     url: str
     audience: str = ""
+    # ADR 0108 key-fetch override: when set, signing keys come from this URL directly and discovery is
+    # never contacted; `iss` is still validated exactly against ``url``. Empty = ordinary discovery.
+    jwks_url: str = ""
+
+    @property
+    def keys_from(self) -> str:
+        return self.jwks_url or f"discovery ({self.url}/.well-known/openid-configuration)"
 
 
 @dataclass(frozen=True)
@@ -55,17 +62,65 @@ class Claims:
     issuer: str
 
 
+class _RemoteKeySet:
+    """Signing keys published at one JWKS URL, fetched by hand with the same HTTP client as discovery.
+
+    Mirrors go-oidc's ``RemoteKeySet``, which booth-core uses (``internal/auth/oidc.go``): keys are
+    fetched on first use and cached with no expiry; a token naming a key id the cache doesn't hold
+    causes one refetch (that's how a key rotation is picked up), and is refused if the refreshed set
+    still lacks it. Keys not meant for signatures, or of a type this verifier can't use, are skipped.
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self._keys: dict[str | None, object] | None = None
+        self._lock = threading.Lock()
+
+    def _fetch(self) -> dict[str | None, object]:
+        with httpx.Client(timeout=10) as http:
+            resp = http.get(self.url)
+            resp.raise_for_status()
+            doc = resp.json()
+        keys: dict[str | None, object] = {}
+        for jwk in doc.get("keys", []):
+            if not isinstance(jwk, dict) or jwk.get("use", "sig") != "sig":
+                continue
+            try:
+                keys[jwk.get("kid")] = PyJWK(jwk).key
+            except (PyJWKError, jwt.InvalidKeyError):  # an unknown kty raises the latter
+                continue
+        return keys
+
+    def key_for(self, raw_token: str):
+        try:
+            kid = jwt.get_unverified_header(raw_token).get("kid")
+        except jwt.PyJWTError as e:
+            raise AuthError(f"malformed token header: {e}") from e
+        with self._lock:
+            if self._keys is None or kid not in self._keys:
+                self._keys = self._fetch()
+            keys = self._keys
+        if kid in keys:
+            return keys[kid]
+        if kid is None and len(keys) == 1:  # an unlabelled token against a single published key
+            return next(iter(keys.values()))
+        raise AuthError("no published signing key matches this token")
+
+
 class _IssuerKeys:
-    """Lazy OIDC discovery for one issuer, so the module starts (and passes health) even while an
-    issuer is briefly unreachable."""
+    """Where one issuer's keys come from, resolved lazily so the module starts (and passes health)
+    even while an issuer is briefly unreachable: the ADR 0108 override URL if configured (no
+    discovery request is ever made), otherwise the ``jwks_uri`` from the issuer's discovery document."""
 
     def __init__(self, issuer: TrustedIssuer) -> None:
         self.issuer = issuer
-        self._jwks: PyJWKClient | None = None
+        self._jwks: _RemoteKeySet | None = None
         self._lock = threading.Lock()
 
-    def client(self) -> PyJWKClient:
+    def client(self) -> _RemoteKeySet:
         with self._lock:
+            if self._jwks is None and self.issuer.jwks_url:
+                self._jwks = _RemoteKeySet(self.issuer.jwks_url)
             if self._jwks is None:
                 with httpx.Client(timeout=10) as http:
                     resp = http.get(f"{self.issuer.url}/.well-known/openid-configuration")
@@ -73,7 +128,7 @@ class _IssuerKeys:
                     doc = resp.json()
                 if doc.get("issuer", "").rstrip("/") != self.issuer.url:
                     raise AuthError("OIDC discovery document's issuer does not match the configured issuer")
-                self._jwks = PyJWKClient(doc["jwks_uri"], cache_keys=True, lifespan=300)
+                self._jwks = _RemoteKeySet(doc["jwks_uri"])
             return self._jwks
 
 
@@ -87,7 +142,7 @@ class DiscoveryKeySource(KeySource):
         self._by_url = {i.url: _IssuerKeys(i) for i in issuers}
 
     def signing_key(self, issuer_url: str, raw_token: str):
-        return self._by_url[issuer_url].client().get_signing_key_from_jwt(raw_token).key
+        return self._by_url[issuer_url].client().key_for(raw_token)
 
 
 class Verifier:
@@ -97,7 +152,7 @@ class Verifier:
     def __init__(self, issuers: list[TrustedIssuer], groups_claim: str = "groups", keys: KeySource | None = None) -> None:
         if not issuers:
             raise ValueError("at least one trusted issuer is required")
-        self._issuers = {i.url.rstrip("/"): TrustedIssuer(i.url.rstrip("/"), i.audience) for i in issuers}
+        self._issuers = {i.url.rstrip("/"): replace(i, url=i.url.rstrip("/")) for i in issuers}
         self._groups_claim = groups_claim or "groups"
         self._keys = keys or DiscoveryKeySource(list(self._issuers.values()))
 

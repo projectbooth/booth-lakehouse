@@ -32,8 +32,13 @@ class Settings:
     def from_env(cls, env=None) -> Settings:
         env = os.environ if env is None else env
         issuers = []
+        jwks_url = env.get("BOOTH_OIDC_JWKS_URL", "")
+        if jwks_url and not env.get("BOOTH_OIDC_ISSUER_URL"):
+            # ADR 0108: the override says where to fetch keys *for* an issuer; without one there is
+            # nothing to validate `iss` against.
+            raise ValueError("BOOTH_OIDC_JWKS_URL is set but BOOTH_OIDC_ISSUER_URL is empty: the issuer is still required to validate `iss`")
         if env.get("BOOTH_OIDC_ISSUER_URL"):
-            issuers.append(TrustedIssuer(env["BOOTH_OIDC_ISSUER_URL"], env.get("BOOTH_OIDC_AUDIENCE", "")))
+            issuers.append(TrustedIssuer(env["BOOTH_OIDC_ISSUER_URL"], env.get("BOOTH_OIDC_AUDIENCE", ""), jwks_url))
         if env.get("BOOTH_WORKLOAD_ISSUER_URL"):
             # Core's workload tokens (ADR 0056): notebooks' kernels and pipeline tasks.
             issuers.append(TrustedIssuer(env["BOOTH_WORKLOAD_ISSUER_URL"], env.get("BOOTH_WORKLOAD_AUDIENCE", "")))

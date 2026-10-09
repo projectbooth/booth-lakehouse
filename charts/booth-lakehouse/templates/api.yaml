@@ -45,6 +45,8 @@ spec:
               value: {{ required "identity.oidcIssuerUrl is required (the deployment's OIDC issuer, as in tokens' iss)" .Values.identity.oidcIssuerUrl | quote }}
             - name: BOOTH_OIDC_AUDIENCE
               value: {{ .Values.identity.oidcAudience | quote }}
+            - name: BOOTH_OIDC_JWKS_URL
+              value: {{ .Values.identity.oidcJwksUrl | quote }}
             - name: BOOTH_GROUPS_CLAIM
               value: {{ .Values.identity.groupsClaim | quote }}
             {{- if .Values.identity.workloadIssuerUrl }}

@@ -27,6 +27,10 @@ identity:
   # The deployment's OIDC issuer (people) — exactly as it appears in tokens' `iss`.
   oidcIssuerUrl: ""
   oidcAudience: ""
+  # Optional key-fetch override (ADR 0108): fetch the OIDC issuer's signing keys from this URL
+  # directly instead of via discovery; `iss` is still validated exactly against oidcIssuerUrl.
+  # Requires oidcIssuerUrl. Empty (the default) = ordinary discovery, unchanged.
+  oidcJwksUrl: ""
   # booth-core's workload-token issuer (notebook kernels, pipeline tasks — ADR 0056). Empty = take it
   # from booth-workload-minting-credentials' `issuer` when workloadIdentity.enabled.
   workloadIssuerUrl: ""

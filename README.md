@@ -87,6 +87,15 @@ Key values: `identity.*` (trusted issuers), `broker.url` (default `<core.url>/ap
 enforces them** — Lakekeeper has no authentication of its own, so "only the API pod reaches it" is a
 real security boundary, not decoration.
 
+**Key-fetch override (ADR 0108).** `identity.oidcJwksUrl` (env `BOOTH_OIDC_JWKS_URL`, default empty)
+makes the API fetch the OIDC issuer's signing keys straight from that URL instead of via discovery,
+while still checking every token's `iss` exactly against `identity.oidcIssuerUrl` (required when this is
+set; the API refuses to start otherwise). The bundled install points it at Keycloak's in-cluster Service
+so no pod has to trust the Ingress certificate. The trust assumption: that fetch is in-cluster,
+unauthenticated and usually plain http, so it relies on NetworkPolicy and cluster trust to keep anyone
+from impersonating the key endpoint. Empty means ordinary discovery, unchanged. The workload issuer is
+unaffected. At startup the API logs each issuer and where its keys come from.
+
 ## Development
 
 ```sh

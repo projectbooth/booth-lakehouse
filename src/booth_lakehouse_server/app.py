@@ -78,6 +78,8 @@ def components_from_settings(s: Settings) -> Components:
         events = TableEvents(store, reader, NatsPublisher(s.events_url, s.events_creds_file), s.events_update_min_gap_seconds)
     else:
         log.warning("BOOTH_EVENTS_URL is empty: no table.* events, so booth-catalog won't learn about tables (ADR 0085)")
+    for i in s.issuers:
+        log.info("oidc: verifying tokens with issuer=%s keys-from=%s", i.url, i.keys_from)
     return Components(Verifier(s.issuers, s.groups_claim), store, lk, wh, reader, s.renew_interval_seconds, events, s.events_interval_seconds)
 
 

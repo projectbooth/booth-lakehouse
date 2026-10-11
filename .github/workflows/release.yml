@@ -1,0 +1,80 @@
+name: Release
+
+# ADR 0111: publishes the container image and the Helm chart at a matching version, so a real
+# install (and booth-module-store's bundled catalog) pins a released build rather than main.
+# Modelled on booth-storage's release workflow plus booth-core's OCI chart push. Pushing a
+# `vX.Y.Z` tag triggers it.
+#
+# One image: the API (./Dockerfile). Lakekeeper is upstream, pinned by digest in the chart;
+# minio-test and the integration test runner are test tooling, not install artifacts.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # The base image comes from docker.io; authenticated pulls get a much higher rate limit.
+      # Same guarded login as booth-core's release workflow (inert on a tag push).
+      - uses: docker/login-action@v3
+        if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.actor != 'dependabot[bot]'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/projectbooth/booth-lakehouse:${{ steps.version.outputs.version }}
+            ghcr.io/projectbooth/booth-lakehouse:latest
+
+  chart:
+    needs: image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Package chart at the release version
+        working-directory: charts/booth-lakehouse
+        run: |
+          helm package . \
+            --version "${{ needs.image.outputs.version }}" \
+            --app-version "${{ needs.image.outputs.version }}" \
+            --destination ../../dist
+
+      - name: Attach chart to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tgz
+          generate_release_notes: true
+
+      - name: helm registry login (ghcr.io)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Push chart as an OCI artifact (ADR 0111)
+        run: helm push dist/booth-lakehouse-${{ needs.image.outputs.version }}.tgz oci://ghcr.io/projectbooth/charts

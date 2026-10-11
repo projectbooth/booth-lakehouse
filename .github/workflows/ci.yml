@@ -34,6 +34,13 @@ jobs:
         run: pytest tests/unit tests/contract
       - name: helm lint
         run: helm lint charts/booth-lakehouse --set identity.oidcIssuerUrl=http://issuer.example
+      - name: Release chart packages and renders (what release.yml does, so it can't rot)
+        # Packaged exactly as on a tag, then rendered from the .tgz; the API image must follow the
+        # packaged version. identity.oidcIssuerUrl is the chart's one required value.
+        run: |
+          helm package charts/booth-lakehouse --version 0.0.0-ci --app-version 0.0.0-ci --destination dist
+          helm template lh dist/booth-lakehouse-0.0.0-ci.tgz --set identity.oidcIssuerUrl=http://issuer.example > rendered.yaml
+          grep -q 'image: "ghcr.io/projectbooth/booth-lakehouse:0.0.0-ci"' rendered.yaml
 
   image:
     # Catches a broken Dockerfile on the PR that breaks it.

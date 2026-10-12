@@ -4,3 +4,8 @@ description: Project Booth's lakehouse module — a self-hosted Lakekeeper Icebe
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+annotations:
+  # ADR 0113: where booth-core's install API puts the platform's identity settings in this chart's
+  # values, filling only leaves the install request leaves unset. Shared name -> values path.
+  booth.projectbooth.io/identity-keys: |
+    {"issuerUrl":"identity.oidcIssuerUrl","clientId":"identity.oidcAudience","jwksUrl":"identity.oidcJwksUrl","workloadIssuerUrl":"identity.workloadIssuerUrl","groupsClaim":"identity.groupsClaim"}

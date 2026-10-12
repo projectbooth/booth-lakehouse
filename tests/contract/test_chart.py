@@ -247,3 +247,75 @@ def test_oidc_jwks_url_passes_through_and_defaults_to_empty(api):
     url = "http://keycloak.booth-system.svc:8080/realms/booth/protocol/openid-connect/certs"
     docs = render("--set", f"identity.oidcJwksUrl={url}")
     assert env_of(pod(one(docs, "Deployment", f"{FULL}-api"))["containers"][0])["BOOTH_OIDC_JWKS_URL"]["value"] == url
+
+
+# ---- ADR 0113: the identity-keys chart annotation (booth-storage's TestChart_IdentityKeysAnnotation) ----
+
+IDENTITY_KEYS = "booth.projectbooth.io/identity-keys"
+SHARED_IDENTITY_KEYS = {"issuerUrl", "clientId", "jwksUrl", "workloadIssuerUrl", "groupsClaim", "iframeIssuerUrl"}
+_MISSING = object()
+
+
+def _value_at(values: dict, dotted: str):
+    node = values
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return _MISSING
+        node = node[part]
+    return node
+
+
+def identity_keys_problems(chart_yaml: str, values_yaml: str) -> list[str]:
+    """Everything wrong with a chart's identity-keys annotation, per contracts/module-manifest.md."""
+    import json
+
+    raw = (yaml.safe_load(chart_yaml).get("annotations") or {}).get(IDENTITY_KEYS)
+    if raw is None:
+        return [f"Chart.yaml is missing the {IDENTITY_KEYS} annotation"]
+    try:
+        mapping = json.loads(raw)
+    except ValueError as e:
+        return [f"{IDENTITY_KEYS} is not valid JSON: {e}"]
+    if not isinstance(mapping, dict) or not mapping:
+        return [f"{IDENTITY_KEYS} must be a non-empty JSON object"]
+    values = yaml.safe_load(values_yaml) or {}
+    problems = []
+    for key, path in mapping.items():
+        if key not in SHARED_IDENTITY_KEYS:
+            problems.append(f"unknown shared setting {key!r} (want one of {sorted(SHARED_IDENTITY_KEYS)})")
+        if not isinstance(path, str) or _value_at(values, path) is _MISSING:
+            problems.append(f"{key!r} maps to values path {path!r}, which has no default in values.yaml")
+    return problems
+
+
+def test_identity_keys_annotation_is_valid_and_maps_this_charts_settings():
+    chart_yaml = (CHART / "Chart.yaml").read_text()
+    values_yaml = (CHART / "values.yaml").read_text()
+    assert identity_keys_problems(chart_yaml, values_yaml) == []
+    import json
+
+    mapping = json.loads(yaml.safe_load(chart_yaml)["annotations"][IDENTITY_KEYS])
+    assert mapping == {
+        "issuerUrl": "identity.oidcIssuerUrl",
+        "clientId": "identity.oidcAudience",  # core supplies booth-design: the audience the platform's tokens carry
+        "jwksUrl": "identity.oidcJwksUrl",
+        "workloadIssuerUrl": "identity.workloadIssuerUrl",
+        "groupsClaim": "identity.groupsClaim",
+    }  # no iframeIssuerUrl: this module's UI is native, it verifies no iframe assertion
+
+
+@pytest.mark.parametrize("annotation,expect", [
+    ('{"issuerUrl": "identity.oidcIssuerUrl"', "not valid JSON"),
+    ("{}", "non-empty JSON object"),
+    ('{"issuer": "identity.oidcIssuerUrl"}', "unknown shared setting 'issuer'"),
+    ('{"issuerUrl": "oidc.issuerUrl"}', "has no default in values.yaml"),
+    ('{"jwksUrl": "identity.oidcJwksUrl.nested"}', "has no default in values.yaml"),
+])
+def test_identity_keys_validator_catches_each_mistake(annotation, expect):
+    chart_yaml = yaml.safe_dump({"apiVersion": "v2", "name": "x", "annotations": {IDENTITY_KEYS: annotation}})
+    problems = identity_keys_problems(chart_yaml, (CHART / "values.yaml").read_text())
+    assert any(expect in p for p in problems), problems
+
+
+def test_identity_keys_missing_annotation_is_reported():
+    assert identity_keys_problems("apiVersion: v2\nname: x\n", "a: 1\n") == [f"Chart.yaml is missing the {IDENTITY_KEYS} annotation"]

@@ -252,7 +252,7 @@ def test_oidc_jwks_url_passes_through_and_defaults_to_empty(api):
 # ---- ADR 0113: the identity-keys chart annotation (booth-storage's TestChart_IdentityKeysAnnotation) ----
 
 IDENTITY_KEYS = "booth.projectbooth.io/identity-keys"
-SHARED_IDENTITY_KEYS = {"issuerUrl", "clientId", "jwksUrl", "workloadIssuerUrl", "groupsClaim", "iframeIssuerUrl"}
+SHARED_IDENTITY_KEYS = {"issuerUrl", "clientId", "jwksUrl", "workloadIssuerUrl", "groupsClaim", "iframeIssuerUrl", "coreUrl"}
 _MISSING = object()
 
 
@@ -301,6 +301,7 @@ def test_identity_keys_annotation_is_valid_and_maps_this_charts_settings():
         "jwksUrl": "identity.oidcJwksUrl",
         "workloadIssuerUrl": "identity.workloadIssuerUrl",
         "groupsClaim": "identity.groupsClaim",
+        "coreUrl": "core.url",  # amendment 1: the broker URL defaults to <core.url>/api/credentials
     }  # no iframeIssuerUrl: this module's UI is native, it verifies no iframe assertion
 
 
@@ -315,6 +316,13 @@ def test_identity_keys_validator_catches_each_mistake(annotation, expect):
     chart_yaml = yaml.safe_dump({"apiVersion": "v2", "name": "x", "annotations": {IDENTITY_KEYS: annotation}})
     problems = identity_keys_problems(chart_yaml, (CHART / "values.yaml").read_text())
     assert any(expect in p for p in problems), problems
+
+
+def test_core_url_supplied_by_core_reaches_the_api_as_its_broker_url():
+    """What core fills into core.url is where the API calls the broker: the chart's one use of its core address."""
+    docs = render("--set", "core.url=http://stub-core.example:9999/")
+    env = env_of(pod(one(docs, "Deployment", f"{FULL}-api"))["containers"][0])
+    assert env["BOOTH_CREDENTIAL_BROKER_URL"]["value"] == "http://stub-core.example:9999/api/credentials"
 
 
 def test_identity_keys_missing_annotation_is_reported():

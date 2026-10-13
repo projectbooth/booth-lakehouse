@@ -21,6 +21,8 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, replace
 
+from . import dbwait
+
 
 @dataclass(frozen=True)
 class Binding:
@@ -181,6 +183,11 @@ class PostgresStore(Store):
 
         self._psycopg = psycopg
         self._dsn = dsn
+        # The first connection of a new pod can be refused for a few seconds (ARCHITECTURE.md item 66).
+        info = psycopg.conninfo.conninfo_to_dict(dsn)  # names the server in the log; never the password
+        dbwait.retry(f"connecting to PostgreSQL at {info.get('host', '')}:{info.get('port', 5432)}", self._create_schema)
+
+    def _create_schema(self) -> None:
         with self._conn() as c:
             c.execute(_SCHEMA)
 

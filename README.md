@@ -118,6 +118,7 @@ sh hack/kind-integration.sh                            # layer 3 on kind: docker
 | `tests/contract` | the BoothModule manifest vs. module-manifest.md; who holds which Secret; no static storage credential anywhere; NetworkPolicies; digest-pinned Lakekeeper |
 | `tests/integration` (compose) | **real Lakekeeper + Postgres + MinIO + NATS JetStream (core's JWT mode) + this API image**, through the real client: create/append/read, time travel, schema evolution, DuckDB, roles, cross-workspace isolation, per-table grants refused by MinIO outside their table, credential renewal, `table.*` events read back as booth-catalog would, the bus refusing any other event type |
 | `hack/kind-integration.sh` | the chart on kind with booth-core's real CRD; the same suite in-cluster; state survives restarting both Deployments |
+| `hack/seaweedfs-gate` (ADR 0118, `.github/workflows/seaweedfs-gate.yml`, re-runs on any change there, including the digest-pinned SeaweedFS image) | Lakekeeper v0.13.6 end to end on SeaweedFS 4.48 with the static key pair booth-storage will mint for each warehouse (no session token, prefix-scoped, rotated by minting a fresh pair): warehouse create and renewal probes, table write/read, rotation, drop with purge, checksum modes. Lakekeeper's own multipart path (metadata over 25 MiB) is untested |
 
 CI: `.github/workflows/ci.yml` (layers 1–2 + image build, every push/PR, required on `main` via branch
 protection), `.github/workflows/integration.yml` (layer 3, merge to `main` and nightly).

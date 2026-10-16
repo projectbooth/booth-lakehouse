@@ -1,0 +1,30 @@
+name: SeaweedFS gate
+
+# ADR 0118 verification gates 2 and 3: Lakekeeper v0.13.6 end to end on SeaweedFS 4.48 with
+# prefix-scoped IAM user keys (hack/seaweedfs-gate). Test tooling; not a required check.
+on:
+  push:
+    paths:
+      - hack/seaweedfs-gate/**
+      - .github/workflows/seaweedfs-gate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Up
+        run: docker compose -f hack/seaweedfs-gate/docker-compose.yml up -d --wait postgres seaweedfs s3log lakekeeper
+      - name: Gate
+        run: docker compose -f hack/seaweedfs-gate/docker-compose.yml --profile gate run --rm --build gate
+      - name: Logs on failure
+        if: failure()
+        run: docker compose -f hack/seaweedfs-gate/docker-compose.yml logs --tail=200 seaweedfs seaweedfs-init s3log lakekeeper
+      - name: Down
+        if: always()
+        run: docker compose -f hack/seaweedfs-gate/docker-compose.yml --profile gate down -v

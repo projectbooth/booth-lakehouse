@@ -33,7 +33,7 @@ jobs:
         run: docker compose -f hack/docker-compose.yml run --rm tests
       - name: Logs on failure
         if: failure()
-        run: docker compose -f hack/docker-compose.yml logs --tail=200 api lakekeeper fakecore nats nats-init
+        run: docker compose -f hack/docker-compose.yml logs --tail=200 api lakekeeper fakecore nats nats-init catalog
       - name: Down
         if: always()
         run: docker compose -f hack/docker-compose.yml down -v

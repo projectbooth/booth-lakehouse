@@ -135,14 +135,9 @@ def test_health_reports_the_publisher(acme):
     assert doc["tableEvents"] == "ok"
 
 
-# FOUND, NOT FIXED (reported for a decision, ADR 0122 B item 4): the event's Nats-Msg-Id is
-# <workspace>:<uuid>:<verb>:<digest> (events.py), so a restore's table.created carries the same id as the
-# table's original table.created when nothing changed in between, and a second drop's table.deleted the
-# same id as the first; inside JetStream's duplicate window (2 min, the NATS default; core sets none)
-# the stream acks and discards them. The API logs "published", booth-catalog never sees them: a restore
-# stays tombstoned until the table next changes, and a re-drop leaves a live catalog entry for a dropped
-# table. strict: these start passing (and so fail here) once a fix lands.
-_DEDUP = pytest.mark.xfail(strict=True, reason="restore/re-drop events de-duplicated by JetStream within its 2-minute window (Nats-Msg-Id reuse)")
+# ADR 0122 addendum 2026-10-19: every drop and every restore has its own Nats-Msg-Id (events.py), so
+# a restore of an unchanged table, or a second drop of the same table, inside JetStream's 2-minute
+# duplicate window still reaches booth-catalog. (Before the fix these two tests were strict xfails.)
 
 
 def _restore(tokens, name: str) -> str:
@@ -160,7 +155,6 @@ def _lifecycle(m: dict) -> tuple:
     return (m["subject"], m["eventType"], m["workspace"], m["publishedBy"])
 
 
-@_DEDUP
 def test_a_drop_and_a_restore_reach_catalog_under_soft_delete(acme, tokens):
     """ADR 0122 B: a soft-deleted table is no longer listed, so booth-catalog is told table.deleted
     (it tombstones the dataset); a restore brings the same table (same UUID) back, announced as
@@ -177,7 +171,7 @@ def test_a_drop_and_a_restore_reach_catalog_under_soft_delete(acme, tokens):
     assert [_lifecycle(m) for m in deleted] == [("booth.acme.table.deleted", "table.deleted", "acme", "lakehouse")]
     assert deleted[0]["data"] == {"tableUuid": tid, "namespace": ns, "name": t}
 
-    _restore(tokens, name)
+    assert _restore(tokens, name) == tid  # Lakekeeper's table id is the Iceberg table UUID
     created = _for(tid)(_events("booth.acme.table.created", lambda ms: len(_for(tid)(ms)) >= 2))
     assert len(created) == 2, f"the restore was not announced: {len(created)} table.created for {tid}"
     again = created[-1]
@@ -186,7 +180,6 @@ def test_a_drop_and_a_restore_reach_catalog_under_soft_delete(acme, tokens):
     assert again["publishedAt"] > deleted[0]["publishedAt"]  # what lets booth-catalog revive the tombstone
 
 
-@_DEDUP
 def test_a_second_drop_after_a_restore_is_announced_too(acme, tokens):
     """Drop, restore, drop again: the second table.deleted must reach catalog, or it keeps a live
     entry for a table that is gone."""
@@ -202,3 +195,51 @@ def test_a_second_drop_after_a_restore_is_announced_too(acme, tokens):
     lh.drop_table(name)
     deleted = _for(tid)(_events("booth.acme.table.deleted", lambda ms: len(_for(tid)(ms)) >= 2))
     assert len(deleted) == 2, f"the second drop was not announced: {len(deleted)} table.deleted for {tid}"
+
+
+CATALOG = os.environ.get("CATALOG_URL", "http://catalog:8080")
+
+
+def _catalog_shows(tokens, name: str, tid: str) -> bool:
+    """Whether booth-catalog (its released image, consuming these events) lists the table: it hides a
+    tombstoned dataset from every read, so absent here is what a drop must lead to."""
+    h = {"Authorization": "Bearer " + tokens["viewer"], "X-Booth-Workspace": "acme"}
+    status, doc = http("GET", f"{CATALOG}/api/datasets?q={name}&limit=50", headers=h)
+    assert status == 200, doc
+    return any(d.get("format") == "iceberg" and (d.get("table") or {}).get("uuid") == tid for d in doc["items"])
+
+
+def _until_catalog(tokens, name: str, tid: str, shown: bool, step: str, timeout: float = 30) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _catalog_shows(tokens, name, tid) == shown:
+            return
+        time.sleep(1)
+    pytest.fail(f"after {step}: booth-catalog {'still does not list' if shown else 'still lists'} {name} ({tid})")
+
+
+def test_drop_restore_drop_restore_inside_two_minutes_leaves_catalog_right_each_time(acme, tokens):
+    """ADR 0122 addendum 2026-10-19: the same unchanged table dropped and restored twice inside
+    JetStream's 2-minute duplicate window. booth-catalog must hide it after each drop and show it after
+    each restore; before every operation had its own message id, the repeats were discarded."""
+    deadline = time.time() + 60
+    while True:
+        status, doc = http("GET", f"{CATALOG}/healthz")
+        if status == 200 and (doc.get("checks") or {}).get("tableEventBus") == "subscribed":
+            break
+        assert time.time() < deadline, f"booth-catalog never subscribed to table.*: {doc}"
+        time.sleep(1)
+
+    lh = lakehouse("acme", tokens["editor"])
+    name = f"ev.cycle_{uuid.uuid4().hex[:8]}"
+    tid = str(lh.create_table(name, [{"id": 1}]).iceberg.metadata.table_uuid)
+    _until_catalog(tokens, name, tid, True, "create")
+
+    start = time.time()
+    for n in (1, 2):
+        lh.drop_table(name)
+        _until_catalog(tokens, name, tid, False, f"drop {n}")
+        assert _restore(tokens, name) == tid
+        _until_catalog(tokens, name, tid, True, f"restore {n}")
+    assert time.time() - start < 120, "the cycle took longer than the duplicate window it is meant to exercise"
+    assert lh.read(name).num_rows == 1  # and the restored table is the same table, data and all

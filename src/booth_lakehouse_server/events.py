@@ -17,6 +17,21 @@ come through the proxy (Lakekeeper's own expiry tasks), and it debounces by cons
 most once per ``update_min_gap_seconds`` (default 60): a burst of appends becomes one event carrying the
 latest state, never a stale one. Writes through the proxy nudge an early pass.
 
+**One message id per operation (ADR 0122, addendum 2026-10-19).** JetStream discards a repeated
+``Nats-Msg-Id`` inside its duplicate window (2 minutes, the NATS default). The id is
+``<workspace>:<uuid>:<verb>:<digest>``, so a retried publish of the same operation collapses, and
+two operations on one table must differ somewhere in it. Under soft delete a table can be dropped,
+restored and dropped again within minutes with nothing else changing, so:
+
+- ``table.deleted`` ends in the deletion time Lakekeeper recorded for that drop
+  (``deleted-tabulars``); every drop of a table has its own. A table no longer in that list (hard
+  delete, or its window passed) can't be dropped again, so it keeps the plain ``deleted``.
+- ``table.created`` for a restore made through this API also carries ``restore-<that drop's
+  deletion time>`` (``restored()``): each restore undoes a different drop. A plain create, or a
+  restore this process didn't make (or made before a restart), has the digest only.
+
+Both values are fixed once per operation, never per attempt, so a retry still has the same id.
+
 **Never deletes on doubt.** If a warehouse's listing fails, that workspace is skipped for the pass. If
 one table's metadata can't be read, it is left exactly as last published.
 
@@ -124,6 +139,14 @@ class TableEvents:
     update_min_gap_seconds: float = 60
     clock: Callable[[], float] = time.time
     status: str = field(default="starting")
+    # warehouse id -> {table id: deletion time} for its soft-deleted tables (Lakekeeper.dropped_tables)
+    dropped: Callable[[str], dict[str, float]] | None = None
+    _restores: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    def restored(self, workspace: str, table_uuid: str, dropped_at: float) -> None:
+        """A restore this API just made, of the drop at ``dropped_at``: its ``table.created`` gets
+        its own message id (in memory until published; one replica)."""
+        self._restores[(workspace, table_uuid)] = f"restore-{dropped_at:.6f}"
 
     def _observe(self, b: Binding) -> tuple[dict[str, dict], set[tuple[str, str]]]:
         """Current tables by UUID, and the (namespace, name) of any listed table whose metadata
@@ -163,19 +186,37 @@ class TableEvents:
 
     async def reconcile(self, b: Binding) -> list[tuple[str, str]]:
         current, unreadable = await asyncio.to_thread(self._observe, b)
+        planned = self.plan(b, current, unreadable)
+        drops: dict[str, float] = {}
+        if self.dropped is not None and any(t == DELETED for t, _, _ in planned):
+            # Raises if Lakekeeper can't list them: the pass fails and is retried, rather than a
+            # drop going out once under one id and later under another.
+            drops = await asyncio.to_thread(self.dropped, b.warehouse_id)
         done = []
-        for event_type, uuid, data in self.plan(b, current, unreadable):
+        for event_type, uuid, data in planned:
             now = self.clock()
             d = digest(current[uuid]) if uuid in current else "deleted"
-            # Same state → same id, so a republish after a crash (before the record below) is
-            # de-duplicated by JetStream rather than delivered twice.
-            await self.publisher.publish(subject(b.workspace, event_type), envelope(b.workspace, event_type, data, now), f"{b.workspace}:{uuid}:{event_type}:{d}")
+            # Same operation → same id, so a republish after a crash (before the record below) is
+            # de-duplicated by JetStream rather than delivered twice; see "One message id per operation".
+            msg_id = f"{b.workspace}:{uuid}:{event_type}:{d}"
+            restore = self._restores.get((b.workspace, uuid)) if event_type == CREATED else None
+            if restore:
+                msg_id += f":{restore}"
+            elif event_type == DELETED and uuid in drops:
+                msg_id += f":{drops[uuid]:.6f}"
+            await self.publisher.publish(subject(b.workspace, event_type), envelope(b.workspace, event_type, data, now), msg_id)
+            if restore:
+                self._restores.pop((b.workspace, uuid), None)
             if event_type == DELETED:
                 await asyncio.to_thread(self.store.forget_published, b.workspace, uuid)
             else:
                 await asyncio.to_thread(self.store.record_published, b.workspace, Published(uuid, data["namespace"], data["name"], d, now))
             log.info("published %s workspace=%s table=%s.%s uuid=%s", event_type, b.workspace, data["namespace"], data["name"], uuid)
             done.append((event_type, uuid))
+        # Every publish succeeded, so a restore still pending for a listed table was never seen gone
+        # (dropped and restored inside one pass): it needs no event.
+        for k in [k for k in self._restores if k[0] == b.workspace and k[1] in current]:
+            del self._restores[k]
         return done
 
     async def run_once(self) -> list[tuple[str, str, str]]:

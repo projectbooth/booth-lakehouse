@@ -239,25 +239,25 @@ def test_admin_counts_leave_out_dropped_tables():
     assert admin.without_dropped(None, 3) is None
 
 
-def test_a_failed_pass_is_retried_sooner_than_the_interval(lk):
-    """The API and Lakekeeper often restart together: a failed first pass must not wait the full
-    interval (300 s by default) before trying again."""
+def _run_profile_loop(lk, failing_passes: int, passes: int):
+    """Runs _profile_loop for ``passes`` passes, Lakekeeper failing the first ``failing_passes``;
+    returns the sleeps between them and the status after."""
     import asyncio
 
     from booth_lakehouse_server import app as app_module
 
     fake, lakekeeper = lk
     store, _ = _existing_hard_warehouse(fake, lakekeeper)
-    fake.fail_profile = True
     profiles = DeleteProfiles(lakekeeper, SOFT)
     comps = Components(verifier(idp), store, lakekeeper, Warehouses(store, lakekeeper, None, None), TableReader("http://lk", transport=fake.transport()),
-                       profiles=profiles, profile_interval_seconds=3600)
+                       profiles=profiles, profile_interval_seconds=300)
     sleeps = []
+    fake.fail_profile = failing_passes > 0
 
     async def fake_sleep(s):
         sleeps.append(s)
-        fake.fail_profile = False
-        if len(sleeps) == 2:
+        fake.fail_profile = len(sleeps) < failing_passes
+        if len(sleeps) == passes:
             raise asyncio.CancelledError
 
     orig = app_module.asyncio.sleep
@@ -269,5 +269,22 @@ def test_a_failed_pass_is_retried_sooner_than_the_interval(lk):
             pass
     finally:
         app_module.asyncio.sleep = orig
-    assert sleeps == [app_module.PROFILE_RETRY_SECONDS, 3600]
-    assert profiles.status("home").status == "ok"
+    return sleeps, profiles.status("home").status
+
+
+def test_a_failed_first_pass_is_retried_within_seconds_with_backoff(lk):
+    """ADR 0122 addendum: the API and Lakekeeper often start together. A failed first pass is retried
+    after 2, 5, 10 s..., not after the 300 s interval, and a success returns to the interval."""
+    sleeps, status = _run_profile_loop(lk, failing_passes=3, passes=5)
+    assert sleeps == [2, 5, 10, 300, 300]
+    assert status == "ok"
+    assert sum(sleeps[:3]) < 60  # soft within about a minute of starting
+
+
+def test_a_lasting_failure_falls_back_to_the_interval_after_the_first_minutes(lk):
+    from booth_lakehouse_server.app import PROFILE_RETRY_SECONDS
+
+    sleeps, status = _run_profile_loop(lk, failing_passes=100, passes=len(PROFILE_RETRY_SECONDS) + 2)
+    assert sleeps == [*PROFILE_RETRY_SECONDS, 300, 300]
+    assert 180 <= sum(PROFILE_RETRY_SECONDS) <= 360  # "the first minutes"
+    assert status == "error"

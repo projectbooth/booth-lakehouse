@@ -59,11 +59,15 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "X-Workspace: home" \
 - **403**: only a workspace owner can restore. Viewers and editors can see the list.
 
 booth-catalog hears about a drop (`table.deleted`) and a restore (`table.created`, same UUID) on the
-next events pass. **Known gap:** if the table is restored within about 2 minutes of its last event
-and hasn't changed in between, the restore's event is silently de-duplicated. The same applies to a
-second drop of the same table within about 2 minutes of the first. The catalog then shows the table
-as gone after a restore (until its next change), or still present after the re-drop. Reported, not
-fixed yet (`tests/integration/test_table_events.py`, the two `xfail` tests).
+next events pass, a few seconds later. Each drop and each restore is its own event, however quickly
+they follow each other: JetStream discards a repeated message id inside its 2-minute window, so a
+drop's id carries the deletion time Lakekeeper recorded for it, and a restore's id the deletion time
+of the drop it undoes (ADR 0122 addendum 2026-10-19). A retried publish of the same drop or restore
+keeps its id and is still collapsed.
+
+One narrow case keeps the plain id: a restore made through this API whose event hadn't gone out when
+the API restarted. If its table hasn't changed since its first `table.created` and that was under
+2 minutes earlier, booth-catalog can miss the restore until the table next changes.
 
 ## The delete profile and its reconcile
 
@@ -77,7 +81,10 @@ how a warehouse created before this setting existed (Lakekeeper's default is `ha
 - **Logged.** `warehouse delete profile changed workspace=<ws> warehouse=<id> from=hard to=soft(604800s)`
   when it changes something. Nothing is logged when the warehouse already matches.
 - **A failure never stops the API.** It logs
-  `warehouse delete profile: couldn't check or apply …` and retries on the next pass. The Lakehouse
+  `warehouse delete profile: couldn't check or apply …` and retries after 2 s, 5 s, 10 s and then
+  every 30 s for about five minutes, before falling back to the normal interval. The API and
+  Lakekeeper often start together, so this is what keeps a fresh install or restart from leaving a
+  warehouse on `hard` for minutes. The Lakehouse
   view shows it on the warehouse ("couldn't be applied: …"), as does `GET /api/admin/warehouses`
   (`deleteProfile.status: "error"` with `error`).
 - **Checking it:** `GET /api/admin/warehouses` → `items[].deleteProfile` (`type`, `expirationSeconds`,
@@ -93,6 +100,21 @@ Install it only **after** booth-spark's `rest-catalog-purge=true` release (ADR 0
 1. In the Lakehouse view, check that the warehouse says "keeps its data for 7 days". Or check
    `deleteProfile` = `soft`, `604800`, `ok` in `GET /api/admin/warehouses`. The API log has the
    `changed … from=hard to=soft(604800s)` line once.
-2. Drill: create a scratch table, drop it, restore it from the view, read it, then drop it again.
+2. Drill, on a scratch table (for example `scratch.drill_<date>`), checking booth-catalog after
+   every step. Run it within about two minutes from first drop to last restore, since that window is
+   what it exercises. "Listed" means the dataset `scratch.drill_<date>` shows in the Catalog's search,
+   or, through core's gateway, in
+   `GET /modules/catalog/api/datasets?q=scratch.drill_<date>` (an item with `format: iceberg` and
+   `table.uuid` equal to the table's UUID). booth-catalog hides a dropped table's dataset, so
+   "not listed" is what a drop should lead to.
+   1. Create it and write one row. booth-catalog lists it within a few seconds.
+   2. Drop it. booth-catalog no longer lists it.
+   3. Restore it from the Lakehouse view. booth-catalog lists it again, and it reads back its row.
+   4. Drop it again. booth-catalog no longer lists it.
+   5. Restore it again. booth-catalog lists it again.
+   6. Drop it a last time and leave it to expire.
+
+   If booth-catalog misses a step, the API log has `published table.deleted` or
+   `published table.created` for the table's UUID; a step with no such line is this module's fault.
 3. Confirm the existing tables and their row counts are unchanged (`nfl.plays` 723,445;
    `nfl.team_game_pbp` 4,190).

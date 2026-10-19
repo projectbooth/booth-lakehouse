@@ -88,7 +88,10 @@ def components_from_settings(s: Settings) -> Components:
     reader = TableReader(s.lakekeeper_url)
     events = None
     if s.events_url:
-        events = TableEvents(store, reader, NatsPublisher(s.events_url, s.events_creds_file), s.events_update_min_gap_seconds)
+        events = TableEvents(
+            store, reader, NatsPublisher(s.events_url, s.events_creds_file), s.events_update_min_gap_seconds,
+            dropped=lambda wid: {t.id: t.dropped_at for t in lk.dropped_tables(wid)},  # a table's id is its Iceberg UUID
+        )
     else:
         log.warning("BOOTH_EVENTS_URL is empty: no table.* events, so booth-catalog won't learn about tables (ADR 0085)")
     for i in s.issuers:
@@ -236,6 +239,8 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
         except httpx.HTTPError as e:
             raise HTTPException(502, f"Lakekeeper: {e}") from None
         log.info("table restored workspace=%s table=%s.%s id=%s by=%s", who.workspace, ".".join(t.namespace), t.name, table_id, who.subject)
+        if c.events is not None:
+            c.events.restored(who.workspace, table_id, t.dropped_at)  # its own message id (events.py)
         nudge.set()  # announce it to booth-catalog soon (table.created, events.py)
         return {"restored": t.public()}
 
@@ -298,14 +303,19 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
     return app
 
 
-PROFILE_RETRY_SECONDS = 15
+# After a failed pass: retry within seconds, backing off, for about the first five minutes; then
+# back to the normal interval. ADR 0122 addendum: a fresh install or restart must not leave a
+# warehouse on hard (Lakekeeper's default) until the next 5-minute pass.
+PROFILE_RETRY_SECONDS = (2, 5, 10, 30, 30, 30, 30, 30, 30, 30, 30, 30)
 
 
 async def _profile_loop(c: Components) -> None:
     """ADR 0122 B: at startup, then every ``profile_interval_seconds``, keep every warehouse at the
-    configured delete profile (deleteprofile.py). Failures are logged and shown in the admin view, and
-    retried sooner (every PROFILE_RETRY_SECONDS): the API and Lakekeeper often restart together, so
-    the first pass after a start can find Lakekeeper not serving yet."""
+    configured delete profile (deleteprofile.py). Failures are logged and shown in the admin view. The
+    API and Lakekeeper often start together, so the first pass can find Lakekeeper not serving yet:
+    a failed pass is retried after PROFILE_RETRY_SECONDS (2 s, 5 s, 10 s, then every 30 s), and only
+    once those run out does it wait the full interval."""
+    failures = 0
     while True:
         failed = True
         try:
@@ -313,7 +323,11 @@ async def _profile_loop(c: Components) -> None:
             failed = bool(await asyncio.to_thread(c.profiles.reconcile_all, bindings))
         except Exception as e:  # noqa: BLE001 - the loop must survive anything (e.g. the database down)
             log.warning("warehouse delete profile pass failed: %s", e)
-        await asyncio.sleep(min(PROFILE_RETRY_SECONDS, c.profile_interval_seconds) if failed else c.profile_interval_seconds)
+        failures = failures + 1 if failed else 0
+        wait = c.profile_interval_seconds
+        if 0 < failures <= len(PROFILE_RETRY_SECONDS):
+            wait = min(PROFILE_RETRY_SECONDS[failures - 1], wait)
+        await asyncio.sleep(wait)
 
 
 async def _renew_loop(c: Components) -> None:

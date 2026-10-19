@@ -66,7 +66,20 @@ def table_stats(lakekeeper: httpx.Client, warehouse_id: str) -> dict | None:
     return {"tables": newest.get("number-of-tables"), "views": newest.get("number-of-views"), "asOf": newest.get("updated-at") or newest.get("timestamp")}
 
 
-def row(b: Binding, now: float, renew_margin_seconds: float, stats: dict | None) -> dict:
+def without_dropped(stats: dict | None, dropped: int | None) -> dict | None:
+    """Lakekeeper's statistics count a soft-deleted table until its window ends (its trigger ignores
+    soft deletes: migration ``20250410024101_fix_warehouse_stats.sql``), so under ADR 0122 B's soft
+    profile a dropped table would stay in the count for 7 days. Report live tables, and the
+    restorable dropped ones separately. ``dropped`` None (couldn't list them) = the count as given."""
+    if stats is None or dropped is None or stats.get("tables") is None:
+        return stats
+    return {**stats, "tables": max(stats["tables"] - dropped, 0), "dropped": dropped}
+
+
+def row(b: Binding, now: float, renew_margin_seconds: float, stats: dict | None, delete_profile: dict | None = None) -> dict:
+    """``deleteProfile``: what a table drop does in this warehouse as last seen by the reconciler
+    (``deleteprofile.py``, ADR 0122 B), with ``status`` ``error`` and the message if it couldn't be
+    checked or applied."""
     return {
         "workspace": b.workspace,
         "warehouseName": b.warehouse_name,
@@ -76,4 +89,5 @@ def row(b: Binding, now: float, renew_margin_seconds: float, stats: dict | None)
         "createdBy": b.created_by,
         "credential": {"status": credential_status(b, now, renew_margin_seconds), "expiresAt": b.credential_expires_at},
         "tables": stats,
+        "deleteProfile": delete_profile,
     }

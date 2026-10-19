@@ -59,6 +59,19 @@ warehouseCredential:
   renewMarginSeconds: 120
   renewIntervalSeconds: 60
 
+# ADR 0122 B: what dropping a table does, in every warehouse. The API applies it when it creates a
+# warehouse and reconciles every existing one at startup and every reconcileSeconds (one Lakekeeper
+# setting per warehouse; no table or file is touched, and tables already dropped keep their window).
+#   soft: a dropped table (DROP TABLE, with or without PURGE, from any engine) keeps its files and can be
+#         restored from the Lakehouse view for expirationSeconds; after that it and its files are gone.
+#   hard: a dropped table and its files are gone within seconds, with no undo.
+# Not a backup: nothing here survives losing the object store (ARCHITECTURE.md item 76).
+warehouse:
+  deleteProfile:
+    type: soft
+    expirationSeconds: 604800 # 7 days
+  reconcileSeconds: 300
+
 networkPolicy:
   enabled: true
   dns:

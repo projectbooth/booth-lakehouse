@@ -44,6 +44,9 @@ class FakeLakekeeper:
         self.calls: list[tuple[str, str, dict | None]] = []
         self.bootstrapped = False
         self.fail_create: tuple[int, str] | None = None
+        self.fail_profile = False
+        self.undrop_conflict = False
+        self.dropped: dict[str, list[dict]] = {}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
@@ -69,7 +72,33 @@ class FakeLakekeeper:
             wid = p.split("/")[4]
             self.warehouses[wid]["storage-credential"] = body["new-storage-credential"]
             return httpx.Response(200, json={})
+        parts = p.split("/")
+        if len(parts) == 5 and p.startswith("/management/v1/warehouse/") and request.method == "GET":
+            if self.fail_profile:
+                return httpx.Response(503, json={"error": {"message": "Lakekeeper is unwell", "type": "ServiceUnavailable", "code": 503}})
+            wh = self.warehouses[parts[4]]
+            return httpx.Response(200, json={"warehouse-id": parts[4], "name": wh["warehouse-name"], "delete-profile": wh.get("delete-profile", {"type": "hard"})})
+        if p.endswith("/delete-profile") and request.method == "POST":
+            self.warehouses[parts[4]]["delete-profile"] = body["delete-profile"]
+            return httpx.Response(200, json={})
+        if p.endswith("/deleted-tabulars") and request.method == "GET":
+            return httpx.Response(200, json={"tabulars": self.dropped.get(parts[4], []), "next-page-token": None})
+        if p.endswith("/deleted-tabulars/undrop") and request.method == "POST":
+            if self.undrop_conflict:
+                return httpx.Response(409, json={"error": {"message": "Tabular with the same name already exists in the namespace", "type": "AlreadyExistsException", "code": 409}})
+            ids = {t["id"] for t in body["targets"]}
+            self.dropped[parts[4]] = [t for t in self.dropped.get(parts[4], []) if t["id"] not in ids]
+            return httpx.Response(204)
         return httpx.Response(404, json={"error": {"message": "nope", "type": "NotFound", "code": 404}})
+
+    def drop(self, warehouse_id: str, namespace: list[str], name: str) -> str:
+        """Record a soft-deleted table the way Lakekeeper lists it."""
+        tid = str(uuid.uuid4())
+        self.dropped.setdefault(warehouse_id, []).append({
+            "id": tid, "name": name, "namespace": namespace, "typ": "table", "warehouse-id": warehouse_id,
+            "created-at": "2026-10-01T00:00:00Z", "deleted-at": "2026-10-19T12:00:00Z", "expiration-date": "2026-10-26T12:00:00Z",
+        })
+        return tid
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handler)

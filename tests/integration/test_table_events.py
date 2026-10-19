@@ -13,7 +13,7 @@ import uuid
 import nats
 import pytest
 
-from .conftest import API, http, lakehouse
+from .conftest import API, FAKECORE, http, lakehouse
 
 NATS_URL = os.environ.get("NATS_URL", "nats://nats:4222")
 CREDS = os.path.join(os.path.dirname(__file__), "natsauth")
@@ -133,3 +133,72 @@ def test_health_reports_the_publisher(acme):
             break
         time.sleep(1)
     assert doc["tableEvents"] == "ok"
+
+
+# FOUND, NOT FIXED (reported for a decision, ADR 0122 B item 4): the event's Nats-Msg-Id is
+# <workspace>:<uuid>:<verb>:<digest> (events.py), so a restore's table.created carries the same id as the
+# table's original table.created when nothing changed in between, and a second drop's table.deleted the
+# same id as the first; inside JetStream's duplicate window (2 min, the NATS default; core sets none)
+# the stream acks and discards them. The API logs "published", booth-catalog never sees them: a restore
+# stays tombstoned until the table next changes, and a re-drop leaves a live catalog entry for a dropped
+# table. strict: these start passing (and so fail here) once a fix lands.
+_DEDUP = pytest.mark.xfail(strict=True, reason="restore/re-drop events de-duplicated by JetStream within its 2-minute window (Nats-Msg-Id reuse)")
+
+
+def _restore(tokens, name: str) -> str:
+    ns, _, t = name.rpartition(".")
+    h = {"Authorization": "Bearer " + tokens["owner"], "X-Workspace": "acme"}
+    status, doc = http("GET", f"{FAKECORE}/modules/lakehouse/api/dropped-tables", headers=h)
+    assert status == 200, doc
+    (item,) = [d for d in doc["items"] if (d["namespace"], d["name"]) == (ns, t)]
+    status, doc = http("POST", f"{FAKECORE}/modules/lakehouse/api/dropped-tables/{item['id']}/restore", headers=h)
+    assert status == 200, doc
+    return item["id"]
+
+
+def _lifecycle(m: dict) -> tuple:
+    return (m["subject"], m["eventType"], m["workspace"], m["publishedBy"])
+
+
+@_DEDUP
+def test_a_drop_and_a_restore_reach_catalog_under_soft_delete(acme, tokens):
+    """ADR 0122 B: a soft-deleted table is no longer listed, so booth-catalog is told table.deleted
+    (it tombstones the dataset); a restore brings the same table (same UUID) back, announced as
+    table.created, which booth-catalog applies over the tombstone because it is published later."""
+    lh = lakehouse("acme", tokens["editor"])
+    name = f"ev.soft_{uuid.uuid4().hex[:8]}"
+    tbl = lh.create_table(name, [{"id": 1}])
+    tid = str(tbl.iceberg.metadata.table_uuid)
+    ns, t = name.split(".")
+    _events("booth.acme.table.created", lambda ms: _for(tid)(ms))
+
+    lh.drop_table(name)
+    deleted = _for(tid)(_events("booth.acme.table.deleted", lambda ms: _for(tid)(ms)))
+    assert [_lifecycle(m) for m in deleted] == [("booth.acme.table.deleted", "table.deleted", "acme", "lakehouse")]
+    assert deleted[0]["data"] == {"tableUuid": tid, "namespace": ns, "name": t}
+
+    _restore(tokens, name)
+    created = _for(tid)(_events("booth.acme.table.created", lambda ms: len(_for(tid)(ms)) >= 2))
+    assert len(created) == 2, f"the restore was not announced: {len(created)} table.created for {tid}"
+    again = created[-1]
+    assert _lifecycle(again) == ("booth.acme.table.created", "table.created", "acme", "lakehouse")
+    assert (again["data"]["namespace"], again["data"]["name"]) == (ns, t)
+    assert again["publishedAt"] > deleted[0]["publishedAt"]  # what lets booth-catalog revive the tombstone
+
+
+@_DEDUP
+def test_a_second_drop_after_a_restore_is_announced_too(acme, tokens):
+    """Drop, restore, drop again: the second table.deleted must reach catalog, or it keeps a live
+    entry for a table that is gone."""
+    lh = lakehouse("acme", tokens["editor"])
+    name = f"ev.twice_{uuid.uuid4().hex[:8]}"
+    tbl = lh.create_table(name, [{"id": 1}])
+    tid = str(tbl.iceberg.metadata.table_uuid)
+    _events("booth.acme.table.created", lambda ms: _for(tid)(ms))
+    lh.drop_table(name)
+    _events("booth.acme.table.deleted", lambda ms: _for(tid)(ms))
+    _restore(tokens, name)
+    _events("booth.acme.table.created", lambda ms: len(_for(tid)(ms)) >= 2, timeout=30)
+    lh.drop_table(name)
+    deleted = _for(tid)(_events("booth.acme.table.deleted", lambda ms: len(_for(tid)(ms)) >= 2))
+    assert len(deleted) == 2, f"the second drop was not announced: {len(deleted)} table.deleted for {tid}"

@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ApiError, getAdminView, lookupUser, type AdminView, type ApiContext, type GetAccessToken, type WarehouseStatus } from "./api";
+import {
+  ApiError,
+  getAdminView,
+  getDroppedTables,
+  lookupUser,
+  restoreDroppedTable,
+  type AdminView,
+  type ApiContext,
+  type DeleteProfile,
+  type DroppedTable,
+  type GetAccessToken,
+  type WarehouseStatus,
+} from "./api";
 
 export type WorkspaceRole = "owner" | "editor" | "viewer";
 
@@ -22,11 +34,12 @@ export interface LakehouseAppProps {
 type State = { kind: "loading" } | { kind: "ready"; view: AdminView } | { kind: "error"; message: string; status: number };
 
 /**
- * booth-lakehouse's native view (ADR 0093), published as @projectbooth/lakehouse-ui: a read-only list
- * of warehouses and their cheap status. Deliberately no create/delete/drop action — creating a
- * warehouse stays in the client library, and deleting one is undecided (a future ADR).
+ * booth-lakehouse's native view (ADR 0093), published as @projectbooth/lakehouse-ui: the warehouses
+ * and their cheap status, plus (ADR 0122 B) what dropping a table does here and the workspace's
+ * recently dropped tables, which an owner can restore. Still no create/delete/drop action — creating
+ * a warehouse stays in the client library, and tables are dropped from engines (SQL, PyIceberg).
  */
-export function LakehouseApp({ workspace, theme, getAccessToken }: LakehouseAppProps) {
+export function LakehouseApp({ workspace, role, theme, getAccessToken }: LakehouseAppProps) {
   const ctx = useMemo<ApiContext>(() => ({ workspace, getAccessToken }), [workspace, getAccessToken]);
   const [state, setState] = useState<State>({ kind: "loading" });
   const [names, setNames] = useState<Record<string, string>>({});
@@ -104,10 +117,155 @@ export function LakehouseApp({ workspace, theme, getAccessToken }: LakehouseAppP
           <code className="font-mono text-xs">create_warehouse(backend_id, path)</code>.
         </Notice>
       ) : (
-        <WarehouseTable items={state.view.items} names={names} />
+        <>
+          <WarehouseTable items={state.view.items} names={names} />
+          {state.view.items.some((i) => i.workspace === workspace) && (
+            <DroppedTablesPanel
+              ctx={ctx}
+              isOwner={role === "owner"}
+              profile={state.view.items.find((i) => i.workspace === workspace)?.deleteProfile ?? null}
+            />
+          )}
+        </>
       )}
     </div>
   );
+}
+
+type Dropped = { kind: "loading" } | { kind: "ready"; items: DroppedTable[]; profile: DeleteProfile | null } | { kind: "error"; message: string };
+
+/**
+ * ADR 0122 B: says what a drop does under this warehouse's current delete profile, and lists the
+ * tables dropped in this workspace that can still be restored. Restore is owner-only (the API
+ * enforces it; the button is only hidden for others).
+ */
+function DroppedTablesPanel({ ctx, isOwner, profile }: { ctx: ApiContext; isOwner: boolean; profile: DeleteProfile | null }) {
+  const [state, setState] = useState<Dropped>({ kind: "loading" });
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ tone: "info" | "error"; text: string } | null>(null);
+
+  const load = useCallback(() => {
+    let live = true;
+    getDroppedTables(ctx).then(
+      (d) => live && setState({ kind: "ready", items: d.items, profile: d.deleteProfile }),
+      (e: unknown) => live && setState({ kind: "error", message: e instanceof Error ? e.message : String(e) }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [ctx]);
+  useEffect(() => load(), [load]);
+
+  const restore = async (t: DroppedTable) => {
+    setBusy(t.id);
+    setMessage(null);
+    try {
+      await restoreDroppedTable(ctx, t.id);
+      setMessage({ tone: "info", text: `Restored ${t.namespace}.${t.name}.` });
+      load();
+    } catch (e: unknown) {
+      setMessage({ tone: "error", text: `Couldn't restore ${t.namespace}.${t.name}: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const shown = profile ?? (state.kind === "ready" ? state.profile : null);
+  return (
+    <section aria-labelledby="dropped-heading" className="flex flex-col gap-3">
+      <h2 id="dropped-heading" className="text-base font-semibold">
+        Dropped tables
+      </h2>
+      <DropSemantics profile={shown} />
+      {message && <Notice tone={message.tone}>{message.text}</Notice>}
+      {state.kind === "loading" ? (
+        <p className="text-sm text-slate-500" role="status">
+          Loading dropped tables…
+        </p>
+      ) : state.kind === "error" ? (
+        <Notice tone="error">Couldn&apos;t load dropped tables: {state.message}</Notice>
+      ) : state.items.length === 0 ? (
+        <p className="text-sm text-slate-500 dark:text-slate-400">No dropped tables to restore.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm" aria-label="Dropped tables">
+            <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              <tr>
+                <th className="py-2 pr-4 font-medium">Table</th>
+                <th className="py-2 pr-4 font-medium">Dropped</th>
+                <th className="py-2 pr-4 font-medium">Restorable until</th>
+                <th className="py-2 font-medium">
+                  <span className="sr-only">Action</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+              {state.items.map((t) => (
+                <tr key={t.id}>
+                  <td className="py-2 pr-4 font-mono text-xs">
+                    {t.namespace}.{t.name}
+                  </td>
+                  <td className="py-2 pr-4">{formatDate(t.droppedAt)}</td>
+                  <td className="py-2 pr-4">{formatDate(t.expiresAt)}</td>
+                  <td className="py-2">
+                    {isOwner ? (
+                      <button
+                        type="button"
+                        onClick={() => restore(t)}
+                        disabled={busy !== null}
+                        className="rounded-md border border-slate-300 px-3 py-1 text-sm hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:hover:bg-slate-800"
+                      >
+                        {busy === t.id ? "Restoring…" : "Restore"}
+                      </button>
+                    ) : (
+                      <span className="text-xs text-slate-500 dark:text-slate-400">A workspace owner can restore it</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** What a drop does under the warehouse's current profile, said before anyone drops anything. */
+function DropSemantics({ profile }: { profile: DeleteProfile | null }) {
+  if (!profile || profile.status === "pending" || !profile.type) {
+    return <Notice>The lakehouse hasn&apos;t confirmed what a drop does in this warehouse yet. Treat a drop as permanent until it does.</Notice>;
+  }
+  const failed = profile.status === "error" && (
+    <p className="mt-1">
+      The configured setting ({profile.desired.type === "soft" ? `restorable for ${duration(profile.desired.expirationSeconds)}` : "no undo"}) couldn&apos;t be
+      applied: {profile.error}. It is retried automatically.
+    </p>
+  );
+  if (profile.type === "soft") {
+    return (
+      <Notice tone={profile.status === "error" ? "error" : "info"}>
+        Dropping a table (<code className="font-mono text-xs">DROP TABLE</code>, with or without <code className="font-mono text-xs">PURGE</code>, from Spark,
+        PyIceberg or any engine) keeps its data for {duration(profile.expirationSeconds)}, and an owner can restore it here. After that the table and its files
+        are deleted for good. This is not a backup of the lake bucket.
+        {failed}
+      </Notice>
+    );
+  }
+  return (
+    <Notice tone="error">
+      Dropping a table deletes its data within seconds. There is no undo.
+      {failed}
+    </Notice>
+  );
+}
+
+function duration(seconds: number | null): string {
+  if (!seconds) return "a short while";
+  const days = seconds / 86400;
+  if (Number.isInteger(days)) return days === 1 ? "1 day" : `${days} days`;
+  const hours = Math.round(seconds / 3600);
+  return hours >= 1 ? `${hours} hours` : `${Math.round(seconds / 60)} minutes`;
 }
 
 function WarehouseTable({ items, names }: { items: WarehouseStatus[]; names: Record<string, string> }) {
@@ -145,6 +303,7 @@ function WarehouseTable({ items, names }: { items: WarehouseStatus[]; names: Rec
                     <span title={w.tables.asOf ? `as of ${w.tables.asOf}` : undefined}>
                       {w.tables.tables}
                       {w.tables.views > 0 && <span className="text-slate-500"> (+{w.tables.views} views)</span>}
+                      {!!w.tables.dropped && <span className="text-slate-500"> ({w.tables.dropped} dropped, restorable)</span>}
                     </span>
                   ) : (
                     <span className="text-slate-500" title="Couldn't read Lakekeeper's statistics just now">

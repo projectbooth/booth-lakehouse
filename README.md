@@ -29,12 +29,25 @@ lh.tables()
 A workspace owner creates the workspace's warehouse once, by choosing where its tables live in
 booth-storage: `lh.create_warehouse("lake", "lakehouse")` (a `{backendId, path}` pair, ADR 0045).
 
+**Dropping a table is restorable for 7 days** (ADR 0122 B). Every drop is a soft delete: `DROP TABLE`
+with or without `PURGE` from Spark, and `drop_table`/`purge_table` from PyIceberg or this client.
+The table's files stay, and a workspace owner can restore it from the Lakehouse view. After 7 days
+the table and its files are deleted for good. This is **not a backup**: nothing copies the lake bucket
+anywhere. See [docs/operations.md](docs/operations.md).
+
 ## The admin view
 
-A single read-only native view under **Manage** (`/lakehouse`, ADR 0093), from
-`@projectbooth/lakehouse-ui` (`web/`): each warehouse's location, creator, storage-credential state and
-table count. Editors/owners see their own workspace; a platform operator (`/platform/operator` in their
-token's groups claim, ADR 0094) sees every workspace. No create/delete actions.
+A single native view under **Manage** (`/lakehouse`, ADR 0093), from `@projectbooth/lakehouse-ui`
+(`web/`), showing each warehouse's location, creator, storage-credential state and table count.
+- Editors and owners see their own workspace. A platform operator (`/platform/operator` in their
+  token's groups claim, ADR 0094) sees every workspace.
+- Below that, under **Dropped tables** (ADR 0122 B):
+  - what a drop does under the warehouse's current delete profile, including any failure to apply
+    it;
+  - the workspace's dropped tables that can still be restored, with when each was dropped and until
+    when;
+  - a **Restore** button for owners.
+- No create, delete or drop actions. Tables are dropped from engines.
 
 ```sh
 cd web && npm ci && npm run dev      # dev harness against BOOTH_LAKEHOUSE_DEV_BACKEND (default :8080)
@@ -60,8 +73,16 @@ client ──Bearer, X-Workspace──▶ core gateway ──▶ API pod ──(
 | **client** (`client/`, package `booth_lakehouse`) | the caller's own token and per-table grants, in memory | — |
 
 - `proxy.py`: which Iceberg REST calls a role may make; everything else is refused (fail closed).
-  Catalog-vended credentials and `/register` are off for everyone; `/v1/config` is always answered for
-  the caller's own warehouse; responses are scrubbed of Lakekeeper's address and storage settings.
+  - Catalog-vended credentials and `/register` are off for everyone.
+  - `/v1/config` is always answered for the caller's own warehouse.
+  - Responses are scrubbed of Lakekeeper's address and storage settings.
+  - A table drop is always forwarded with `purgeRequested=true`, and `force` is stripped from drops.
+    Under the soft delete profile this is what makes every drop restorable, then cleaned up
+    (ADR 0122 B).
+- `deleteprofile.py`: keeps every warehouse at `warehouse.deleteProfile` (default soft, 7 days).
+  - It runs at startup and every 5 minutes, and is idempotent.
+  - It touches no tables or files, and logs each change.
+  - A failure shows in the admin view and never stops the API.
 - `warehouses.py`: owner creates a warehouse from a static-key broker grant (Lakekeeper can't hold a
   session token); the API renews it before expiry as its own workload identity (ADR 0056).
 - `identity.py`: same verification and role derivation as the rest of the fleet (ADR 0041), plus
@@ -82,7 +103,8 @@ helm install lakehouse charts/booth-lakehouse -n booth-lakehouse \
 ```
 
 Key values: `identity.*` (trusted issuers), `broker.url` (default `<core.url>/api/credentials`),
-`workloadIdentity.enabled`, `tableEvents.*`, `warehouseCredential.*`, `core.namespaceSelector`/`podSelector`
+`workloadIdentity.enabled`, `tableEvents.*`, `warehouseCredential.*`, `warehouse.deleteProfile` (what a
+table drop does; default soft for 7 days, see [docs/operations.md](docs/operations.md)), `core.namespaceSelector`/`podSelector`
 (must match your core install; they gate the API's ingress). **The NetworkPolicies need a CNI that
 enforces them** — Lakekeeper has no authentication of its own, so "only the API pod reaches it" is a
 real security boundary, not decoration.
@@ -114,9 +136,9 @@ sh hack/kind-integration.sh                            # layer 3 on kind: docker
 
 | Suite | What it proves |
 |---|---|
-| `tests/unit` | the `table.*` publisher's decisions (created/updated/deleted, rename, drop-recreate, debounce, never-delete-on-doubt, ack-before-record), token verification + role derivation, every proxy rule, response scrubbing, broker adapter (scope echo, refusals, no secret in repr/logs), warehouse create/renew, the HTTP app with a fake Lakekeeper, client location→`{backendId, path}` mapping and grant caching |
+| `tests/unit` | the `table.*` publisher's decisions (created/updated/deleted, rename, drop-recreate, debounce, never-delete-on-doubt, ack-before-record), token verification + role derivation, every proxy rule, response scrubbing, broker adapter (scope echo, refusals, no secret in repr/logs), warehouse create/renew, the HTTP app with a fake Lakekeeper, client location→`{backendId, path}` mapping and grant caching, the drop rewrite, the delete-profile reconcile (idempotent, logged, failures shown not fatal) and the restore routes |
 | `tests/contract` | the BoothModule manifest vs. module-manifest.md; who holds which Secret; no static storage credential anywhere; NetworkPolicies; digest-pinned Lakekeeper |
-| `tests/integration` (compose) | **real Lakekeeper + Postgres + MinIO + NATS JetStream (core's JWT mode) + this API image**, through the real client: create/append/read, time travel, schema evolution, DuckDB, roles, cross-workspace isolation, per-table grants refused by MinIO outside their table, credential renewal, `table.*` events read back as booth-catalog would, the bus refusing any other event type |
+| `tests/integration` (compose) | **real Lakekeeper + Postgres + MinIO + NATS JetStream (core's JWT mode) + this API image**, through the real client: create/append/read, time travel, schema evolution, DuckDB, roles, cross-workspace isolation, per-table grants refused by MinIO outside their table, credential renewal, `table.*` events read back as booth-catalog would, the bus refusing any other event type; every kind of drop (PyIceberg, purge, Spark-style no flag, `force`) keeps the files and is restorable, restore and its 409, and an existing hard warehouse with tables switched to soft with every table, row and file unchanged (`test_drops.py`) |
 | `hack/kind-integration.sh` | the chart on kind with booth-core's real CRD; the same suite in-cluster; state survives restarting both Deployments |
 | `hack/seaweedfs-gate` (ADR 0118, `.github/workflows/seaweedfs-gate.yml`, re-runs on any change there, including the digest-pinned SeaweedFS image) | Lakekeeper v0.13.6 end to end on SeaweedFS 4.48 with the static key pair booth-storage will mint for each warehouse (no session token, prefix-scoped, rotated by minting a fresh pair): warehouse create and renewal probes, table write/read, rotation, drop with purge, checksum modes. Lakekeeper's own multipart path (metadata over 25 MiB) is untested |
 
@@ -134,5 +156,7 @@ protection), `.github/workflows/integration.yml` (layer 3, merge to `main` and n
   `@projectbooth/lakehouse-ui`.
 - [0004](docs/decisions/0004-minio-test-image-built-from-source.md): the shared MinIO test image
   (`ghcr.io/projectbooth/minio-test`, built from source, pinned by digest).
+- [design-drop-semantics.md](docs/design-drop-semantics.md): what a table drop did, the options, and
+  the one chosen (ADR 0122 B: soft delete, 7 days). Operating it: [docs/operations.md](docs/operations.md).
 
 Ratified upstream: ADR 0084 (the first pass's judgment calls), ADR 0085 (tables as `iceberg`-format datasets).

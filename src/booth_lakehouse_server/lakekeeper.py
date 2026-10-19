@@ -51,6 +51,42 @@ def storage_profile(grant: S3Grant) -> dict:
     }
 
 
+def delete_profile(kind: str, expiration_seconds: int) -> dict:
+    """Lakekeeper's ``delete-profile`` (ADR 0122 B): ``soft`` keeps a dropped table restorable for
+    ``expiration_seconds``, then removes it; ``hard`` removes it at once."""
+    if kind == "soft":
+        return {"type": "soft", "expiration-seconds": int(expiration_seconds)}
+    if kind == "hard":
+        return {"type": "hard"}
+    raise ValueError(f"unknown delete profile {kind!r} (soft or hard)")
+
+
+def same_profile(a: dict | None, b: dict) -> bool:
+    if not a or a.get("type") != b["type"]:
+        return False
+    return b["type"] != "soft" or int(a.get("expiration-seconds", -1)) == b["expiration-seconds"]
+
+
+@dataclass(frozen=True)
+class DroppedTable:
+    """A soft-deleted table, restorable until ``expires_at`` (Unix seconds)."""
+
+    id: str
+    namespace: tuple[str, ...]
+    name: str
+    dropped_at: float
+    expires_at: float
+
+    def public(self) -> dict:
+        return {"id": self.id, "namespace": ".".join(self.namespace), "name": self.name, "droppedAt": self.dropped_at, "expiresAt": self.expires_at}
+
+
+def _unix(ts: str) -> float:
+    from datetime import datetime
+
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+
+
 def storage_credential(grant: S3Grant) -> dict:
     if grant.session_token:
         # Lakekeeper would silently drop the token and then fail every storage call.
@@ -104,10 +140,44 @@ class Lakekeeper:
                 return Warehouse(w.get("warehouse-id") or w["id"], name)
         return None
 
-    def create_warehouse(self, name: str, grant: S3Grant) -> Warehouse:
+    def create_warehouse(self, name: str, grant: S3Grant, profile: dict | None = None) -> Warehouse:
         body = {"warehouse-name": name, "storage-profile": storage_profile(grant), "storage-credential": storage_credential(grant)}
+        if profile is not None:
+            body["delete-profile"] = profile
         doc = self._check(self._http.post("/management/v1/warehouse", json=body), "create the warehouse").json()
         return Warehouse(doc["warehouse-id"], name)
+
+    def delete_profile(self, warehouse_id: str) -> dict:
+        doc = self._check(self._http.get(f"/management/v1/warehouse/{warehouse_id}"), "describe the warehouse").json()
+        return doc.get("delete-profile") or {"type": "hard"}  # Lakekeeper's default when unset
+
+    def set_delete_profile(self, warehouse_id: str, profile: dict) -> None:
+        """Changes only what *later* drops do: one warehouse setting, no table or file touched, and a
+        table already dropped keeps the window it was dropped with (Lakekeeper docs, "Soft Deletion")."""
+        self._check(
+            self._http.post(f"/management/v1/warehouse/{warehouse_id}/delete-profile", json={"delete-profile": profile}),
+            "change the warehouse's delete profile",
+        )
+
+    def dropped_tables(self, warehouse_id: str) -> list[DroppedTable]:
+        out: list[DroppedTable] = []
+        params: dict = {"pageSize": 100}
+        while True:
+            doc = self._check(self._http.get(f"/management/v1/warehouse/{warehouse_id}/deleted-tabulars", params=params), "list dropped tables").json()
+            for t in doc.get("tabulars", []):
+                if t.get("typ", "table") != "table":
+                    continue  # views carry no data; nothing to restore that matters here
+                out.append(DroppedTable(str(t["id"]), tuple(t.get("namespace", [])), t["name"], _unix(t["deleted-at"]), _unix(t["expiration-date"])))
+            token = doc.get("next-page-token")
+            if not token:
+                return out
+            params = {"pageSize": 100, "pageToken": token}
+
+    def undrop_table(self, warehouse_id: str, table_id: str) -> None:
+        self._check(
+            self._http.post(f"/management/v1/warehouse/{warehouse_id}/deleted-tabulars/undrop", json={"targets": [{"type": "table", "id": table_id}]}),
+            "restore the table",
+        )
 
     def update_credential(self, warehouse_id: str, grant: S3Grant) -> None:
         body = {"new-storage-credential": storage_credential(grant)}

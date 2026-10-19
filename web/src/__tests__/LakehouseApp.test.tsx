@@ -116,4 +116,61 @@ describe("LakehouseApp", () => {
     expect(container.firstElementChild).toHaveAttribute("data-theme", "dark");
     await screen.findByText(/has no warehouse yet/); // let the load settle inside the test
   });
+
+  describe("dropped tables (ADR 0122 B)", () => {
+    const soft = { type: "soft", expirationSeconds: 604800, status: "ok", desired: { type: "soft", expirationSeconds: 604800 } };
+    const plays = { id: "t-1", namespace: "nfl", name: "plays", droppedAt: 1790000000, expiresAt: 1790604800 };
+
+    it("says what a drop does before anything is dropped, and lets an owner restore", async () => {
+      let restored = false;
+      const calls = mockFetch({
+        "/modules/lakehouse/api/admin/warehouses": json({ scope: "workspace", items: [row("acme", { deleteProfile: soft })] }),
+        "/modules/lakehouse/api/dropped-tables/t-1/restore": () => {
+          restored = true;
+          return json({ restored: plays })();
+        },
+        "/modules/lakehouse/api/dropped-tables": () => json({ deleteProfile: soft, items: restored ? [] : [plays] })(),
+        "/api/users/": json({}, 404),
+      });
+      render(<LakehouseApp {...props} />);
+      expect(await screen.findByText(/keeps its data for 7 days/)).toBeInTheDocument();
+      expect(screen.getByText(/not a backup of the lake bucket/)).toBeInTheDocument();
+      expect(await screen.findByText("nfl.plays")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+      expect(await screen.findByText("Restored nfl.plays.")).toBeInTheDocument();
+      expect(await screen.findByText("No dropped tables to restore.")).toBeInTheDocument();
+      const post = calls.find((c) => c.url.endsWith("/restore"))!;
+      expect(post.headers.Authorization).toBe("Bearer tok-1");
+    });
+
+    it("shows the 409 when the name is in use again, and hides Restore from non-owners", async () => {
+      mockFetch({
+        "/modules/lakehouse/api/admin/warehouses": json({ scope: "workspace", items: [row("acme", { deleteProfile: soft })] }),
+        "/modules/lakehouse/api/dropped-tables/t-1/restore": json({ detail: "a table with this name exists now; rename or drop it first" }, 409),
+        "/modules/lakehouse/api/dropped-tables": json({ deleteProfile: soft, items: [plays] }),
+        "/api/users/": json({}, 404),
+      });
+      const { unmount } = render(<LakehouseApp {...props} />);
+      await userEvent.click(await screen.findByRole("button", { name: "Restore" }));
+      expect(await screen.findByText(/a table with this name exists now; rename or drop it first/)).toBeInTheDocument();
+      unmount();
+      render(<LakehouseApp {...props} role="editor" />);
+      expect(await screen.findByText("A workspace owner can restore it")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    });
+
+    it("warns when drops are permanent or the profile couldn't be applied", async () => {
+      mockFetch({
+        "/modules/lakehouse/api/admin/warehouses": json({
+          scope: "workspace",
+          items: [row("acme", { deleteProfile: { type: "hard", expirationSeconds: null, status: "error", error: "Lakekeeper refused", desired: soft.desired } })],
+        }),
+        "/modules/lakehouse/api/dropped-tables": json({ deleteProfile: null, items: [] }),
+        "/api/users/": json({}, 404),
+      });
+      render(<LakehouseApp {...props} />);
+      expect(await screen.findByText(/deletes its data within seconds. There is no undo./)).toBeInTheDocument();
+      expect(screen.getByText(/restorable for 7 days\) couldn't be applied: Lakekeeper refused/)).toBeInTheDocument();
+    });
+  });
 });

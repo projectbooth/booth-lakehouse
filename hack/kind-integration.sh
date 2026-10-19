@@ -10,6 +10,7 @@
 # 3. The chart is installed; its Lakekeeper migrates and serves, its API becomes ready.
 # 4. The whole real-stack suite runs in-cluster as a Job against the chart's own Services.
 # 5. Both Deployments are restarted and a warehouse + table are checked to have survived.
+# 6. The API starts before Lakekeeper with a warehouse on hard: it reaches soft within about a minute.
 set -eu
 
 CLUSTER=${CLUSTER:-booth-lakehouse-it}
@@ -150,5 +151,42 @@ echo "---- restart both Deployments; state must survive"
 k -n "$NS" rollout restart deploy/$RELEASE-booth-lakehouse-api deploy/$RELEASE-booth-lakehouse-lakekeeper
 k -n "$NS" rollout status deploy/$RELEASE-booth-lakehouse-api deploy/$RELEASE-booth-lakehouse-lakekeeper --timeout=180s
 run_suite restart "BOOTH_AFTER_RESTART=1" tests/integration/test_after_restart.py
+
+echo "---- the API starts before Lakekeeper is ready; a warehouse on hard reaches soft within about a minute"
+API_DEPLOY=deploy/$RELEASE-booth-lakehouse-api
+LK_DEPLOY=deploy/$RELEASE-booth-lakehouse-lakekeeper
+# From the API pod (the only one the NetworkPolicy lets reach Lakekeeper). Prints the type, or sets it.
+lk_profile() { # $1 = "" to print acme's warehouse delete-profile type, or a type to set
+  k -n "$NS" exec "$API_DEPLOY" -- python -c "
+import httpx, sys
+lk = httpx.Client(base_url='http://$RELEASE-booth-lakehouse-lakekeeper:8181/management/v1', timeout=5)
+(w,) = [w for w in lk.get('/warehouse').json()['warehouses'] if w['name'] == 'booth-ws-acme']
+if sys.argv[1]:
+    lk.post('/warehouse/%s/delete-profile' % w['warehouse-id'], json={'delete-profile': {'type': sys.argv[1]}}).raise_for_status()
+print(lk.get('/warehouse/' + w['warehouse-id']).json()['delete-profile']['type'])
+" "$1"
+}
+[ "$(lk_profile hard)" = hard ]
+k -n "$NS" scale "$API_DEPLOY" "$LK_DEPLOY" --replicas=0
+k -n "$NS" wait --for=delete pod -l app.kubernetes.io/component=api --timeout=120s
+k -n "$NS" wait --for=delete pod -l app.kubernetes.io/component=lakekeeper --timeout=120s
+k -n "$NS" scale "$API_DEPLOY" --replicas=1
+# The API is running (not ready: its readiness follows Lakekeeper) and its first pass has failed.
+deadline=$(( $(date +%s) + 120 ))
+until k -n "$NS" logs "$API_DEPLOY" 2>/dev/null | grep -q "warehouse delete profile: couldn't check or apply"; do
+  [ "$(date +%s)" -ge "$deadline" ] && { echo "the API never reported a failed first pass"; exit 1; }
+  sleep 2
+done
+started=$(date +%s)
+k -n "$NS" scale "$LK_DEPLOY" --replicas=1
+k -n "$NS" rollout status "$API_DEPLOY" "$LK_DEPLOY" --timeout=180s
+until k -n "$NS" logs "$API_DEPLOY" | grep -q "warehouse delete profile changed workspace=acme .* from=hard to=soft(604800s)"; do
+  [ $(( $(date +%s) - started )) -ge 120 ] && { echo "still not soft $(( $(date +%s) - started ))s after Lakekeeper was started"; exit 1; }
+  sleep 1
+done
+took=$(( $(date +%s) - started ))
+echo "soft ${took}s after Lakekeeper was started (Lakekeeper's own start included)"
+[ "$(lk_profile "")" = soft ]
+[ "$took" -le 75 ]
 
 echo "---- PASS"

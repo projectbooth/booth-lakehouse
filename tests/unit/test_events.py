@@ -19,7 +19,7 @@ from booth_lakehouse_server.events import (
     payload,
     subject,
 )
-from booth_lakehouse_server.store import Binding, MemoryStore
+from booth_lakehouse_server.store import Binding, MemoryStore, Published
 from booth_lakehouse_server.tables import TableNotFound, TableRef
 
 ROOT = "s3://lake/acme-data/lakehouse"
@@ -218,3 +218,91 @@ def test_helpers():
     assert digest(s) == digest({**s, "lastUpdatedMs": 2, "snapshots": []})
     doc = json.loads(envelope("acme", CREATED, {"x": 1}, 0))
     assert doc == {"workspace": "acme", "eventType": CREATED, "publishedAt": "1970-01-01T00:00:00.000000Z", "publishedBy": "lakehouse", "data": {"x": 1}}
+
+
+def _soft(ev, reader):
+    """Lakekeeper's soft-deleted list, as TableEvents.dropped reads it."""
+    drops: dict[str, dict[str, float]] = {}
+    ev.dropped = lambda wid: dict(drops.get(wid, {}))
+    return drops
+
+
+def test_each_drop_and_each_restore_has_its_own_msg_id(env):
+    """ADR 0122 addendum: drop, restore, drop, restore of an unchanged table inside JetStream's
+    2-minute window must be four distinct ids, or the stream discards the repeats."""
+    store, reader, pub, ev, now = env
+    drops = _soft(ev, reader)
+    table = md("u1")
+    reader.put("W1", "sales", "daily", table)
+    run(ev)
+    for dropped_at in (2000.0, 2030.0):
+        reader.drop("W1", "sales", "daily")
+        drops["W1"] = {"u1": dropped_at}
+        run(ev)
+        reader.put("W1", "sales", "daily", table)  # restored: same uuid, same state
+        drops["W1"] = {}
+        ev.restored("acme", "u1", dropped_at)
+        run(ev)
+    kinds = [e["eventType"] for _, e, _ in pub.sent]
+    assert kinds == [CREATED, DELETED, CREATED, DELETED, CREATED]
+    ids = [m for _, _, m in pub.sent]
+    assert len(set(ids)) == 5, ids
+    assert ids[1].endswith(":table.deleted:deleted:2000.000000") and ids[2].endswith(":restore-2000.000000")
+    assert not ev._restores  # published, so forgotten
+
+
+def test_a_retried_drop_or_restore_keeps_its_msg_id(env):
+    store, reader, pub, ev, now = env
+    drops = _soft(ev, reader)
+    reader.put("W1", "sales", "daily", md("u1"))
+    run(ev)
+    reader.drop("W1", "sales", "daily")
+    drops["W1"] = {"u1": 2000.0}
+    pub.fail_after = 1
+    run(ev)  # the publish fails: nothing recorded, retried next pass
+    pub.fail_after = None
+    run(ev)
+    reader.put("W1", "sales", "daily", md("u1"))
+    drops["W1"] = {}
+    ev.restored("acme", "u1", 2000.0)
+    pub.fail_after = 2
+    run(ev)
+    pub.fail_after = None
+    run(ev)
+    assert [e["eventType"] for _, e, _ in pub.sent] == [CREATED, DELETED, CREATED]
+    # and a crash after the publish, before the record: the same operation republished, same id
+    deleted_id = pub.sent[1][2]
+    reader.drop("W1", "sales", "daily")
+    drops["W1"] = {"u1": 2000.0}
+    store.record_published("acme", Published("u1", "sales", "daily", "x", 1000.0))  # as before the drop
+    run(ev)
+    assert pub.sent[-1][2] == deleted_id
+
+
+def test_a_drop_whose_deletion_time_cant_be_read_waits_for_the_next_pass(env):
+    store, reader, pub, ev, now = env
+    reader.put("W1", "sales", "daily", md("u1"))
+    run(ev)
+
+    def down(wid):
+        raise httpx.ConnectError("lakekeeper down")
+
+    ev.dropped = down
+    reader.drop("W1", "sales", "daily")
+    run(ev)
+    assert len(pub.sent) == 1 and ev.status.startswith("error") and "u1" in store.published("acme")
+
+
+def test_a_hard_drop_keeps_the_plain_id_and_an_unpublished_restore_is_forgotten(env):
+    store, reader, pub, ev, now = env
+    _soft(ev, reader)  # empty: a hard delete leaves nothing listed
+    reader.put("W1", "sales", "daily", md("u1"))
+    run(ev)
+    reader.drop("W1", "sales", "daily")
+    run(ev)
+    assert pub.sent[-1][2] == "acme:u1:table.deleted:deleted"
+    reader.put("W1", "sales", "other", md("u2"))
+    run(ev)
+    ev.restored("acme", "u2", 5.0)  # dropped and restored between two passes: nothing to announce
+    run(ev)
+    assert len(pub.sent) == 3 and not ev._restores

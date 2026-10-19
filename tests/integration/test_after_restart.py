@@ -39,4 +39,4 @@ def test_the_chart_default_delete_profile_is_applied_after_a_restart():
         if row and row["status"] == "ok":
             break
         time.sleep(2)
-    assert row and (row["type"], row["expirationSeconds"], row["status"]) == ("soft", 604800, "ok"), row
+    assert row and (row["type"], row["expirationSeconds"], row["status"]) == ("soft", 604800, "ok"), f"deleteProfile={row!r} error={(row or {}).get('error')!r}"

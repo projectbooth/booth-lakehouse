@@ -237,3 +237,37 @@ def test_admin_counts_leave_out_dropped_tables():
     assert admin.without_dropped({"tables": 5, "views": 1, "asOf": None}, 2) == {"tables": 3, "views": 1, "asOf": None, "dropped": 2}
     assert admin.without_dropped({"tables": 5, "views": 1, "asOf": None}, None) == {"tables": 5, "views": 1, "asOf": None}
     assert admin.without_dropped(None, 3) is None
+
+
+def test_a_failed_pass_is_retried_sooner_than_the_interval(lk):
+    """The API and Lakekeeper often restart together: a failed first pass must not wait the full
+    interval (300 s by default) before trying again."""
+    import asyncio
+
+    from booth_lakehouse_server import app as app_module
+
+    fake, lakekeeper = lk
+    store, _ = _existing_hard_warehouse(fake, lakekeeper)
+    fake.fail_profile = True
+    profiles = DeleteProfiles(lakekeeper, SOFT)
+    comps = Components(verifier(idp), store, lakekeeper, Warehouses(store, lakekeeper, None, None), TableReader("http://lk", transport=fake.transport()),
+                       profiles=profiles, profile_interval_seconds=3600)
+    sleeps = []
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+        fake.fail_profile = False
+        if len(sleeps) == 2:
+            raise asyncio.CancelledError
+
+    orig = app_module.asyncio.sleep
+    app_module.asyncio.sleep = fake_sleep
+    try:
+        try:
+            asyncio.run(app_module._profile_loop(comps))
+        except asyncio.CancelledError:
+            pass
+    finally:
+        app_module.asyncio.sleep = orig
+    assert sleeps == [app_module.PROFILE_RETRY_SECONDS, 3600]
+    assert profiles.status("home").status == "ok"

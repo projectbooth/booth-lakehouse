@@ -298,16 +298,22 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
     return app
 
 
+PROFILE_RETRY_SECONDS = 15
+
+
 async def _profile_loop(c: Components) -> None:
     """ADR 0122 B: at startup, then every ``profile_interval_seconds``, keep every warehouse at the
-    configured delete profile (deleteprofile.py). Failures are logged and shown in the admin view."""
+    configured delete profile (deleteprofile.py). Failures are logged and shown in the admin view, and
+    retried sooner (every PROFILE_RETRY_SECONDS): the API and Lakekeeper often restart together, so
+    the first pass after a start can find Lakekeeper not serving yet."""
     while True:
+        failed = True
         try:
             bindings = await asyncio.to_thread(c.store.all)
-            await asyncio.to_thread(c.profiles.reconcile_all, bindings)
+            failed = bool(await asyncio.to_thread(c.profiles.reconcile_all, bindings))
         except Exception as e:  # noqa: BLE001 - the loop must survive anything (e.g. the database down)
             log.warning("warehouse delete profile pass failed: %s", e)
-        await asyncio.sleep(c.profile_interval_seconds)
+        await asyncio.sleep(min(PROFILE_RETRY_SECONDS, c.profile_interval_seconds) if failed else c.profile_interval_seconds)
 
 
 async def _renew_loop(c: Components) -> None:

@@ -20,7 +20,7 @@ the default `hard` delete profile; each case creates a table with 3 rows (5 obje
 
 Why: `DropParams.purge_requested` has `#[serde(default = "true_fn")]`
 (`crates/lakekeeper/src/api/iceberg/types.rs:396`). Under `hard`, `drop_table` schedules a
-`tabular_purge` task when it is true (`server/tables.rs:793`). **This is deliberate and documented
+`tabular_purge` task when it is true (`server/tables.rs:795`). **This is deliberate and documented
 upstream** (`docs/docs/concepts.md`, "Dropping Tables": managed tables default `purgeRequested` to
 true unless explicitly false).
 
@@ -80,7 +80,7 @@ Add a contract test for the chart's default profile.
     `purgeRequested` true or said nothing.
   - So after expiry a PyIceberg `drop_table` (explicit `false`) leaves orphans: 5 objects kept,
     verified.
-  - `force=true` bypasses soft entirely (`server/tables.rs:785`). Our clients don't send it.
+  - `force=true` bypasses soft entirely (`server/tables.rs:783`). Our clients don't send it.
   - Undropping fails with 409 (`AlreadyExistsException`) if a live table now has the same name.
     That table must be renamed or dropped first.
 - **Window:** proposed **7 days** (`604800` s). It is per warehouse.

@@ -105,6 +105,9 @@ class Warehouses:
     ttl_seconds: int = 3600
     renew_margin_seconds: int = 900
     clock: Callable[[], float] = time.time
+    # ADR 0122 B: the profile a new warehouse is created with (deleteprofile.py keeps existing ones
+    # at it). None = Lakekeeper's default (hard).
+    delete_profile: dict | None = None
 
     def __post_init__(self) -> None:
         self._noted: dict[tuple[str, str, str], float] = {}
@@ -150,7 +153,7 @@ class Warehouses:
         name = warehouse_name(who.workspace)
         self.lakekeeper.ensure_bootstrapped()
         try:
-            wh = self.lakekeeper.create_warehouse(name, grant)
+            wh = self.lakekeeper.create_warehouse(name, grant, self.delete_profile)
         except LakekeeperError as e:
             if e.kind == "CreateWarehouseStorageProfileOverlap":
                 raise WarehouseError(f"{backend_id}:{path} overlaps another workspace's warehouse; choose a separate folder", 409) from None
@@ -161,6 +164,8 @@ class Warehouses:
                 if wh is None:
                     raise WarehouseError(str(e), 502) from None
                 self.lakekeeper.update_credential(wh.id, grant)
+                if self.delete_profile is not None:
+                    self.lakekeeper.set_delete_profile(wh.id, self.delete_profile)
             elif e.status == 400 or e.status == 422:
                 raise WarehouseError(f"Lakekeeper couldn't use {backend_id}:{path} as a warehouse: {e}", 422) from None
             else:

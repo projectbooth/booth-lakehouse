@@ -10,8 +10,13 @@
 - ``GET  /api/tables/{ns}/{table}``    — one table: schema, location as ``{backendId, path}``,
                                          snapshots. Minus snapshots, the ``table.*`` event payload
                                          booth-catalog registers (ADR 0085, events.py).
+- ``GET  /api/dropped-tables``         — this workspace's dropped tables still restorable under the
+                                         soft delete profile (any role), with when each was dropped
+                                         and when it stops being restorable (ADR 0122 B).
+- ``POST /api/dropped-tables/{id}/restore`` — owner: restore one; 409 if a table of that name
+                                         exists now.
 - ``*    /iceberg/v1/...``             — the Iceberg REST catalog, authorized per ``proxy.py`` and
-                                         forwarded to Lakekeeper.
+                                         forwarded to Lakekeeper (table drops rewritten, ADR 0122 B).
 """
 
 from __future__ import annotations
@@ -33,9 +38,10 @@ from booth_lakehouse.broker import Broker, HttpBroker
 
 from . import admin, proxy
 from .config import Settings
+from .deleteprofile import DeleteProfiles
 from .events import NatsPublisher, TableEvents, run_forever
-from .identity import AuthError, Forbidden, Identity, Verifier, resolve
-from .lakekeeper import Lakekeeper
+from .identity import OWNER, AuthError, Forbidden, Identity, Verifier, resolve
+from .lakekeeper import Lakekeeper, LakekeeperError, delete_profile
 from .store import MemoryStore, PostgresStore, Store
 from .tables import TableNotFound, TableReader, TableRef, table_summary
 from .warehouses import WarehouseError, Warehouses, WorkloadTokens
@@ -58,6 +64,11 @@ class Components:
     renew_interval_seconds: int = 60
     events: TableEvents | None = None
     events_interval_seconds: float = 10
+    profiles: DeleteProfiles | None = None
+    profile_interval_seconds: float = 300
+
+
+RESTORE_CONFLICT = "a table with this name exists now; rename or drop it first"
 
 
 def components_from_settings(s: Settings) -> Components:
@@ -71,7 +82,9 @@ def components_from_settings(s: Settings) -> Components:
     lk = Lakekeeper(s.lakekeeper_url)
     broker_for: Callable[[Callable[[], str]], Broker] | None = (lambda tok: HttpBroker(s.broker_url, tok)) if s.broker_url else None
     minter = WorkloadTokens(s.workload_mint_url, s.workload_mint_credential) if s.workload_mint_url and s.workload_mint_credential else None
-    wh = Warehouses(store, lk, broker_for, minter, s.warehouse_ttl_seconds, s.renew_margin_seconds)
+    profile = delete_profile(s.warehouse_delete_profile, s.warehouse_delete_expiration_seconds)
+    log.info("warehouse delete profile: %s", profile)
+    wh = Warehouses(store, lk, broker_for, minter, s.warehouse_ttl_seconds, s.renew_margin_seconds, delete_profile=profile)
     reader = TableReader(s.lakekeeper_url)
     events = None
     if s.events_url:
@@ -80,7 +93,10 @@ def components_from_settings(s: Settings) -> Components:
         log.warning("BOOTH_EVENTS_URL is empty: no table.* events, so booth-catalog won't learn about tables (ADR 0085)")
     for i in s.issuers:
         log.info("oidc: verifying tokens with issuer=%s keys-from=%s", i.url, i.keys_from)
-    return Components(Verifier(s.issuers, s.groups_claim), store, lk, wh, reader, s.renew_interval_seconds, events, s.events_interval_seconds)
+    return Components(
+        Verifier(s.issuers, s.groups_claim), store, lk, wh, reader, s.renew_interval_seconds, events, s.events_interval_seconds,
+        DeleteProfiles(lk, profile), s.delete_profile_reconcile_seconds,
+    )
 
 
 class WarehouseRequest(BaseModel):
@@ -101,6 +117,9 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
             tasks.append(asyncio.create_task(_renew_loop(c)))
         if c.events is not None:
             tasks.append(asyncio.create_task(run_forever(c.events, nudge, c.events_interval_seconds)))
+        if c.profiles is not None:
+            # In the background: Lakekeeper being down at startup must not keep the API from serving.
+            tasks.append(asyncio.create_task(_profile_loop(c)))
         yield
         for t in tasks:
             t.cancel()
@@ -145,7 +164,10 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
     @app.put("/api/warehouse", status_code=201)
     def put_warehouse(body: WarehouseRequest, who: Identity = Depends(identity)):
         try:
-            return c.warehouses.create(who, body.backendId, body.path).public()
+            b = c.warehouses.create(who, body.backendId, body.path)
+            if c.profiles is not None:
+                c.profiles.created(b)
+            return b.public()
         except Forbidden as e:
             raise HTTPException(403, str(e)) from None
         except WarehouseError as e:
@@ -173,8 +195,49 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
         rows = []
         for b in bindings:
             stats = await asyncio.to_thread(admin.table_stats, c.lakekeeper.http, b.warehouse_id)
-            rows.append(admin.row(b, now, margin, stats))
+            try:
+                dropped = len(await asyncio.to_thread(c.lakekeeper.dropped_tables, b.warehouse_id))
+            except (LakekeeperError, httpx.HTTPError, ValueError, KeyError):
+                dropped = None  # degrade the one field, never the view (ADR 0093)
+            stats = admin.without_dropped(stats, dropped)
+            profile = c.profiles.status(b.workspace).public(c.profiles.desired) if c.profiles is not None else None
+            rows.append(admin.row(b, now, margin, stats, profile))
         return {"scope": access.scope, "items": rows}
+
+    @app.get("/api/dropped-tables")
+    async def dropped_tables(who: Identity = Depends(identity)):
+        b = _binding(who)
+        try:
+            items = await asyncio.to_thread(c.lakekeeper.dropped_tables, b.warehouse_id)
+        except (LakekeeperError, httpx.HTTPError) as e:
+            raise HTTPException(502, f"Lakekeeper: {e}") from None
+        profile = c.profiles.status(b.workspace).public(c.profiles.desired) if c.profiles is not None else None
+        return {"deleteProfile": profile, "items": [t.public() for t in sorted(items, key=lambda t: -t.dropped_at)]}
+
+    @app.post("/api/dropped-tables/{table_id}/restore")
+    async def restore_table(table_id: str, who: Identity = Depends(identity)):
+        try:
+            who.require(OWNER)
+        except Forbidden as e:
+            raise HTTPException(403, str(e)) from None
+        b = _binding(who)
+        try:
+            # Only an id dropped from *this* workspace's warehouse: never act on one named by a caller
+            # that isn't in the listing (and the listing answers the 404 clearly, expired or not).
+            mine = {t.id: t for t in await asyncio.to_thread(c.lakekeeper.dropped_tables, b.warehouse_id)}
+            t = mine.get(table_id)
+            if t is None:
+                raise HTTPException(404, "no restorable dropped table with that id in this workspace (it may have passed its restore window)")
+            await asyncio.to_thread(c.lakekeeper.undrop_table, b.warehouse_id, table_id)
+        except LakekeeperError as e:
+            if e.status == 409:
+                raise HTTPException(409, RESTORE_CONFLICT) from None
+            raise HTTPException(502, str(e)) from None
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"Lakekeeper: {e}") from None
+        log.info("table restored workspace=%s table=%s.%s id=%s by=%s", who.workspace, ".".join(t.namespace), t.name, table_id, who.subject)
+        nudge.set()  # announce it to booth-catalog soon (table.created, events.py)
+        return {"restored": t.public()}
 
     @app.get("/api/tables")
     async def list_tables(who: Identity = Depends(identity)):
@@ -212,6 +275,7 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
         if not decision.allowed:
             return _iceberg_error(decision.status, decision.reason)
         query = f"warehouse={quote(b.warehouse_name)}" if decision.is_config else request.scope.get("query_string", b"").decode("latin-1")
+        query = proxy.drop_query(request.method, sub, query)  # every table drop restorable (ADR 0122 B)
         headers = {k: v for k, v in request.headers.items() if k.lower() in _FORWARD_REQUEST}
         upstream = await catalog.request(request.method, sub + (f"?{query}" if query else ""), content=await request.body(), headers=headers)
         body = upstream.content
@@ -232,6 +296,18 @@ def create_app(c: Components, run_renewals: bool = True, catalog_transport: http
         return Response(content=body, status_code=upstream.status_code, headers=out_headers)
 
     return app
+
+
+async def _profile_loop(c: Components) -> None:
+    """ADR 0122 B: at startup, then every ``profile_interval_seconds``, keep every warehouse at the
+    configured delete profile (deleteprofile.py). Failures are logged and shown in the admin view."""
+    while True:
+        try:
+            bindings = await asyncio.to_thread(c.store.all)
+            await asyncio.to_thread(c.profiles.reconcile_all, bindings)
+        except Exception as e:  # noqa: BLE001 - the loop must survive anything (e.g. the database down)
+            log.warning("warehouse delete profile pass failed: %s", e)
+        await asyncio.sleep(c.profile_interval_seconds)
 
 
 async def _renew_loop(c: Components) -> None:

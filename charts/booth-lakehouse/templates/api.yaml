@@ -82,6 +82,12 @@ spec:
               value: {{ .Values.warehouseCredential.renewMarginSeconds | quote }}
             - name: WAREHOUSE_CREDENTIAL_RENEW_INTERVAL_SECONDS
               value: {{ .Values.warehouseCredential.renewIntervalSeconds | quote }}
+            - name: WAREHOUSE_DELETE_PROFILE
+              value: {{ .Values.warehouse.deleteProfile.type | quote }}
+            - name: WAREHOUSE_DELETE_EXPIRATION_SECONDS
+              value: {{ .Values.warehouse.deleteProfile.expirationSeconds | int | quote }}
+            - name: WAREHOUSE_DELETE_PROFILE_RECONCILE_SECONDS
+              value: {{ .Values.warehouse.reconcileSeconds | int | quote }}
           ports:
             - {name: http, containerPort: 8080}
           readinessProbe:

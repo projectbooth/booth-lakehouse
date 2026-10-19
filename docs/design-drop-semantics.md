@@ -1,6 +1,6 @@
 # Design note: what dropping a lakehouse table does, and the undo window (ADR 0122 part B)
 
-Status: **for the user's decision.** Nothing here is built. The homelab is frozen until the NFL gate
+Status: **decided: the user chose (ii)** (ADR 0122 B, accepted). Built as described in [operations.md](operations.md), with the proxy also stripping `force` from drops. When written: nothing built, and the homelab frozen until the NFL gate
 (Wed 21 Oct 09:00) and the cutover are done (ADR 0121). Source: ADR 0122, booth-spark
 `docs/findings-iceberg-drop-purge.md` (b780965), Lakekeeper v0.13.6 source (`ff42848`), PyIceberg
 0.12.0 source, and a local reproduction (below). Written 2026-10-19.

@@ -23,6 +23,11 @@ class Settings:
     warehouse_ttl_seconds: int = 300
     renew_margin_seconds: int = 120
     renew_interval_seconds: int = 60
+    # ADR 0122 B: what a table drop does in every warehouse. soft = restorable for the window, then
+    # removed; reconciled at startup and every delete_profile_reconcile_seconds (deleteprofile.py).
+    warehouse_delete_profile: str = "soft"
+    warehouse_delete_expiration_seconds: int = 604800
+    delete_profile_reconcile_seconds: float = 300
     events_url: str = ""
     events_creds_file: str = ""
     events_interval_seconds: float = 10
@@ -42,6 +47,8 @@ class Settings:
         if env.get("BOOTH_WORKLOAD_ISSUER_URL"):
             # Core's workload tokens (ADR 0056): notebooks' kernels and pipeline tasks.
             issuers.append(TrustedIssuer(env["BOOTH_WORKLOAD_ISSUER_URL"], env.get("BOOTH_WORKLOAD_AUDIENCE", "")))
+        if env.get("WAREHOUSE_DELETE_PROFILE", "soft") not in ("soft", "hard"):
+            raise ValueError("WAREHOUSE_DELETE_PROFILE must be soft or hard")
         if not env.get("LAKEKEEPER_URL"):
             raise ValueError("LAKEKEEPER_URL is required")
         return cls(
@@ -55,6 +62,9 @@ class Settings:
             warehouse_ttl_seconds=int(env.get("WAREHOUSE_CREDENTIAL_TTL_SECONDS", "300")),
             renew_margin_seconds=int(env.get("WAREHOUSE_CREDENTIAL_RENEW_MARGIN_SECONDS", "120")),
             renew_interval_seconds=int(env.get("WAREHOUSE_CREDENTIAL_RENEW_INTERVAL_SECONDS", "60")),
+            warehouse_delete_profile=env.get("WAREHOUSE_DELETE_PROFILE", "soft"),
+            warehouse_delete_expiration_seconds=int(env.get("WAREHOUSE_DELETE_EXPIRATION_SECONDS", "604800")),
+            delete_profile_reconcile_seconds=float(env.get("WAREHOUSE_DELETE_PROFILE_RECONCILE_SECONDS", "300")),
             # ADR 0050's booth-event-bus-credentials (url + nats.creds). Empty URL = no table.* events.
             events_url=env.get("BOOTH_EVENTS_URL", ""),
             events_creds_file=env.get("BOOTH_EVENTS_CREDS_FILE", ""),

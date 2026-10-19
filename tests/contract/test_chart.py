@@ -198,6 +198,16 @@ def test_api_config_points_at_lakekeeper_and_the_broker(api):
     assert env["BOOTH_OIDC_ISSUER_URL"]["value"].endswith("/realms/booth")
 
 
+def test_every_warehouse_defaults_to_a_seven_day_soft_delete(api):
+    """ADR 0122 B: dropped tables restorable for 7 days unless the operator says otherwise."""
+    env = env_of(pod(api)["containers"][0])
+    assert env["WAREHOUSE_DELETE_PROFILE"]["value"] == "soft"
+    assert env["WAREHOUSE_DELETE_EXPIRATION_SECONDS"]["value"] == "604800"
+    assert env["WAREHOUSE_DELETE_PROFILE_RECONCILE_SECONDS"]["value"] == "300"
+    hard = env_of(pod(one(render("--set", "warehouse.deleteProfile.type=hard"), "Deployment", f"{FULL}-api"))["containers"][0])
+    assert hard["WAREHOUSE_DELETE_PROFILE"]["value"] == "hard"
+
+
 def test_the_issuer_is_required():
     out = helm("template", RELEASE, str(CHART))
     assert out.returncode != 0 and "identity.oidcIssuerUrl is required" in out.stderr

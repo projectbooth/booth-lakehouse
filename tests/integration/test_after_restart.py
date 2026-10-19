@@ -22,3 +22,21 @@ def test_warehouse_and_table_survive_a_restart():
     assert sorted(lh.read("persist.check").column("v").to_pylist()) == [1, 2, 3]
     lh.append("persist.check", [{"v": 4}])  # and still writable: Lakekeeper still holds a live credential
     assert lh.read("persist.check").num_rows == 4
+
+
+def test_the_chart_default_delete_profile_is_applied_after_a_restart():
+    """ADR 0122 B on the real chart: the API's startup reconcile leaves the warehouse at the chart's
+    default, soft for 7 days, and says so in the admin view."""
+    import time
+
+    from .conftest import FAKECORE, http
+
+    tok = token("bob-editor", "/workspaces/acme/editor")
+    deadline, row = time.time() + 60, None
+    while time.time() < deadline:
+        status, view = http("GET", f"{FAKECORE}/modules/lakehouse/api/admin/warehouses", headers={"Authorization": "Bearer " + tok, "X-Workspace": "acme"})
+        row = view["items"][0]["deleteProfile"] if status == 200 and view.get("items") else None
+        if row and row["status"] == "ok":
+            break
+        time.sleep(2)
+    assert row and (row["type"], row["expirationSeconds"], row["status"]) == ("soft", 604800, "ok"), row

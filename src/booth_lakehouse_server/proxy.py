@@ -18,6 +18,21 @@ tables is decided here, as pure functions over (method, path, role, the workspac
   * ``/v1/oauth/tokens`` — platform tokens come from the platform, not the catalog;
   * anything not recognised (fail closed: a new Lakekeeper endpoint stays blocked until reviewed).
 
+Drops are rewritten before they are forwarded (ADR 0122 B, ``drop_query``):
+
+- a **table** ``DELETE`` always goes out with ``purgeRequested=true``, whatever the client sent. Every
+  warehouse has Lakekeeper's ``soft`` delete profile (``deleteprofile.py``), under which a drop only
+  marks the table deleted: its files stay and it can be restored for the window (7 days by
+  default). The flag decides what happens *after* the window: ``true`` removes the files with the
+  catalog entry, ``false`` leaves them behind with nothing pointing at them, unreachable for good
+  because ``/register`` is refused here. So forcing it is what makes every drop, plain or ``PURGE``,
+  from Spark, PyIceberg (which sends ``false``) or ``booth_lakehouse``, the same thing: restorable for
+  the window, then cleaned up. (Lakekeeper itself already treats a *missing* flag as ``true``; only an
+  explicit ``false`` changes here.) The alternative was an orphan sweeper.
+- ``force`` is removed from every table, view and namespace ``DELETE``: Lakekeeper's ``force`` skips
+  the soft profile and deletes at once, and on a namespace with ``recursive=true`` takes every table
+  in it along. Nothing in the fleet sends it.
+
 Responses are rewritten so a client keeps talking to this proxy and never learns Lakekeeper's
 internal address or storage settings: ``uri`` is removed from the config overrides/defaults (a client
 honours it and would otherwise go around the proxy — found against real Lakekeeper, which sets it to
@@ -28,7 +43,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import unquote
+from urllib.parse import parse_qsl, unquote, urlencode
 
 from .identity import EDITOR, RANK, VIEWER
 
@@ -111,6 +126,21 @@ def authorize(method: str, path: str, role: str, warehouse_id: str) -> Decision:
             return Decision(False, 403, f"this needs the {rule.role} role; you have {role or 'none'}")
         return Decision(True, is_config=path == "/v1/config")
     return Decision(False, 404, "not a supported catalog endpoint")
+
+
+_TABLE = re.compile(rf"^/v1/{_SEG}/namespaces/{_SEG}/tables/{_SEG}$")
+_DROPPABLE = re.compile(rf"^/v1/{_SEG}/namespaces/{_SEG}(/(tables|views)/{_SEG})?$")
+
+
+def drop_query(method: str, path: str, query: str) -> str:
+    """The query string to forward for a request (see the module docstring, ADR 0122 B)."""
+    path = path.rstrip("/")
+    if method.upper() != "DELETE" or not _DROPPABLE.match(path):
+        return query
+    params = [(k, v) for k, v in parse_qsl(query, keep_blank_values=True) if k.lower() != "force"]
+    if _TABLE.match(path):
+        params = [(k, v) for k, v in params if k != "purgeRequested"] + [("purgeRequested", "true")]
+    return urlencode(params)
 
 
 _STORAGE_KEY = re.compile(r"^(s3\.|adls\.|gcs\.|client\.|oss\.|azure\.)|^region$")

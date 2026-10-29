@@ -31,6 +31,8 @@ export interface LakehouseAppProps {
   getAccessToken: GetAccessToken;
 }
 
+const ACCESS_NOTE = "Warehouses are read-only here; a workspace owner can restore dropped tables.";
+
 type State = { kind: "loading" } | { kind: "ready"; view: AdminView } | { kind: "error"; message: string; status: number };
 
 /**
@@ -54,6 +56,16 @@ export function LakehouseApp({ workspace, role, theme, getAccessToken }: Lakehou
     return () => {
       live = false;
     };
+  }, [ctx]);
+
+  // After a restore: the warehouse row's table counts change (one fewer dropped, one more live).
+  // Fetched quietly, so the panel (and its "Restored …" message) stays mounted; on failure the row
+  // keeps its last counts until Refresh.
+  const refreshView = useCallback(() => {
+    getAdminView(ctx).then(
+      (view) => setState({ kind: "ready", view }),
+      () => undefined,
+    );
   }, [ctx]);
 
   // Always ask: the server answers "workspace", "all" (an operator, whatever their role here), or 403.
@@ -82,8 +94,8 @@ export function LakehouseApp({ workspace, role, theme, getAccessToken }: Lakehou
           <h1 className="text-lg font-semibold">Lakehouse warehouses</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
             {state.kind === "ready" && state.view.scope === "all"
-              ? "Every workspace (operator view). Read-only."
-              : `Workspace ${workspace}. Read-only.`}
+              ? `Every workspace (operator view). ${ACCESS_NOTE}`
+              : `Workspace ${workspace}. ${ACCESS_NOTE}`}
           </p>
         </div>
         {!forbidden && (
@@ -123,6 +135,7 @@ export function LakehouseApp({ workspace, role, theme, getAccessToken }: Lakehou
             <DroppedTablesPanel
               ctx={ctx}
               isOwner={role === "owner"}
+              onRestored={refreshView}
               profile={state.view.items.find((i) => i.workspace === workspace)?.deleteProfile ?? null}
             />
           )}
@@ -139,7 +152,17 @@ type Dropped = { kind: "loading" } | { kind: "ready"; items: DroppedTable[]; pro
  * tables dropped in this workspace that can still be restored. Restore is owner-only (the API
  * enforces it; the button is only hidden for others).
  */
-function DroppedTablesPanel({ ctx, isOwner, profile }: { ctx: ApiContext; isOwner: boolean; profile: DeleteProfile | null }) {
+function DroppedTablesPanel({
+  ctx,
+  isOwner,
+  profile,
+  onRestored,
+}: {
+  ctx: ApiContext;
+  isOwner: boolean;
+  profile: DeleteProfile | null;
+  onRestored: () => void;
+}) {
   const [state, setState] = useState<Dropped>({ kind: "loading" });
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: "info" | "error"; text: string } | null>(null);
@@ -163,6 +186,7 @@ function DroppedTablesPanel({ ctx, isOwner, profile }: { ctx: ApiContext; isOwne
       await restoreDroppedTable(ctx, t.id);
       setMessage({ tone: "info", text: `Restored ${t.namespace}.${t.name}.` });
       load();
+      onRestored();
     } catch (e: unknown) {
       setMessage({ tone: "error", text: `Couldn't restore ${t.namespace}.${t.name}: ${e instanceof Error ? e.message : String(e)}` });
     } finally {

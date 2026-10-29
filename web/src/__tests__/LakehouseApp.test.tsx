@@ -48,6 +48,8 @@ describe("LakehouseApp", () => {
     expect(screen.getByText("4")).toBeInTheDocument();
     expect(screen.getByText("OK")).toBeInTheDocument();
     expect(await screen.findByText("by Alice A.")).toBeInTheDocument();
+    expect(screen.getByText("Workspace acme. Warehouses are read-only here; a workspace owner can restore dropped tables.")).toBeInTheDocument();
+    expect(screen.queryByText(/Read-only\./)).not.toBeInTheDocument();
     const call = calls.find((c) => c.url.startsWith("/modules/lakehouse"))!;
     expect(call.headers.Authorization).toBe("Bearer tok-1");
     expect(call.headers["X-Workspace"]).toBe("acme");
@@ -59,7 +61,7 @@ describe("LakehouseApp", () => {
       "/api/users/": json({}, 404),
     });
     render(<LakehouseApp {...props} />);
-    expect(await screen.findByText(/Every workspace \(operator view\)/)).toBeInTheDocument();
+    expect(await screen.findByText("Every workspace (operator view). Warehouses are read-only here; a workspace owner can restore dropped tables.")).toBeInTheDocument();
     const cells = screen.getAllByRole("row").slice(1).map((r) => r.firstElementChild?.textContent);
     expect(cells).toEqual(["acme", "beta"]); // sorted
     expect(screen.getByText("—")).toBeInTheDocument();
@@ -141,6 +143,32 @@ describe("LakehouseApp", () => {
       expect(await screen.findByText("No dropped tables to restore.")).toBeInTheDocument();
       const post = calls.find((c) => c.url.endsWith("/restore"))!;
       expect(post.headers.Authorization).toBe("Bearer tok-1");
+    });
+
+    it("refreshes the warehouse row's table counts after a restore, keeping the panel's message", async () => {
+      let restored = false;
+      const calls = mockFetch({
+        "/modules/lakehouse/api/admin/warehouses": () =>
+          json({
+            scope: "workspace",
+            items: [row("acme", { deleteProfile: soft, tables: restored ? { tables: 5, views: 1, asOf: "x" } : { tables: 4, views: 1, dropped: 1, asOf: "x" } })],
+          })(),
+        "/modules/lakehouse/api/dropped-tables/t-1/restore": () => {
+          restored = true;
+          return json({ restored: plays })();
+        },
+        "/modules/lakehouse/api/dropped-tables": () => json({ deleteProfile: soft, items: restored ? [] : [plays] })(),
+        "/api/users/": json({}, 404),
+      });
+      render(<LakehouseApp {...props} />);
+      expect(await screen.findByText(/1 dropped, restorable/)).toBeInTheDocument();
+      expect(screen.getByText("4")).toBeInTheDocument();
+      await userEvent.click(await screen.findByRole("button", { name: "Restore" }));
+      await waitFor(() => expect(screen.queryByText(/dropped, restorable/)).not.toBeInTheDocument());
+      expect(screen.getByText("5")).toBeInTheDocument();
+      expect(screen.getByText("Restored nfl.plays.")).toBeInTheDocument();
+      expect(await screen.findByText("No dropped tables to restore.")).toBeInTheDocument();
+      expect(calls.filter((c) => c.url.startsWith("/modules/lakehouse/api/admin/warehouses"))).toHaveLength(2);
     });
 
     it("shows the 409 when the name is in use again, and hides Restore from non-owners", async () => {
